@@ -108,8 +108,10 @@ def test_table_order_creation_accepts_qr_channel_metadata(client):
 def test_ready_queue_keeps_served_ticket_while_active_kitchen_queue_excludes_it(client):
     oid, _ = lifecycle(client)
     assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1}).status_code == 200
-    sent = client.post(f"/api/orders/{oid}/send")
-    ticket = sent.json()["ticket"]["id"]
+    assert client.post(f"/api/orders/{oid}/confirm", json={"customer_name":"Mika"}).status_code == 200
+    paid = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+    assert paid.status_code == 200
+    ticket = paid.json()["ticket"]["id"]
     for action in ("start", "ready", "serve"):
         assert client.post(f"/api/kitchen/{ticket}/{action}").status_code == 200
 
@@ -123,7 +125,6 @@ def test_ready_queue_keeps_served_ticket_while_active_kitchen_queue_excludes_it(
     assert ready.json()[0]["status"] == "served"
     assert client.get("/api/kitchen?queue=invalid").status_code == 422
 
-    assert client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"}).status_code == 200
     assert client.post(f"/api/orders/{oid}/close").status_code == 200
     assert client.get("/api/kitchen?queue=ready").json() == []
 
