@@ -220,17 +220,13 @@ def send_order(oid:int):
     c=connect()
     try:
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
-        if o["status"] in {"sent", "paid"}:
-            if o["status"] == "paid":
-                create_ticket(c, oid)
-                c.commit()
-            else:
-                c.commit()
+        if o["status"] == "paid":
+            create_ticket(c, oid)
+            c.commit()
             return order_view(c, oid)
-        if o["status"] == "awaiting_payment": fail("Payment is required before sending the order to kitchen", 409)
-        if o["status"]!="open": fail("Order must be open before sending",409)
-        if not c.execute("SELECT 1 FROM restaurant_order_lines WHERE order_id=?",(oid,)).fetchone(): fail("Cannot send an empty order",409)
-        stamp = now_iso(); c.execute("UPDATE restaurant_orders SET status='sent',sent_at=? WHERE id=?",(stamp,oid)); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM kitchen_tickets").fetchone()[0]; c.execute("INSERT INTO kitchen_tickets VALUES(?,?,?,'queued','main',?,?,NULL,NULL)",(n,f"KIT-{n:04d}",oid,stamp,None)); c.commit(); return order_view(c,oid)
+        if o["status"] in {"open", "awaiting_payment"}:
+            fail("Payment is required before sending the order to kitchen", 409)
+        fail("Order must be open before sending", 409)
     except HTTPException:c.rollback();raise
     finally:c.close()
 
@@ -255,7 +251,7 @@ def pay(oid:int,x:PaymentIn):
     try:
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]=="paid": c.commit(); return order_view(c, oid)
-        if o["status"] not in {"awaiting_payment", "served"}: fail("Order must be awaiting payment or served before payment",409)
+        if o["status"] != "awaiting_payment": fail("Order must be awaiting payment before payment",409)
         if abs(x.amount-o["total"])>0.001: fail("Payment amount must equal order total",409)
         stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,x.amount,x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
         if o["status"] == "awaiting_payment":

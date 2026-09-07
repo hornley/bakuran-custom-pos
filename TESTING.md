@@ -36,7 +36,8 @@ Supported values for `queue` are `active` and `ready`; other values return HTTP 
 
 ## Current phase handoff
 
-- Backend tests: pending final run
-- Frontend build: pending final run
+- Backend tests: `11 passed`
+- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
+- Frontend build: passed
 - Database: isolated temporary test databases
 - Phase status: awaiting developer approval

@@ -40,11 +40,12 @@ def lifecycle(client):
 def test_complete_floor_kitchen_payment_close_workflow(client):
     oid, session = lifecycle(client)
     assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1}).status_code == 200
-    assert client.post(f"/api/orders/{oid}/send").status_code == 200
-    ticket = client.get(f"/api/orders/{oid}").json()["ticket"]["id"]
+    assert client.post(f"/api/orders/{oid}/confirm", json={"customer_name":"Mika"}).status_code == 200
+    paid = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+    assert paid.status_code == 200
+    ticket = paid.json()["ticket"]["id"]
     for action in ("start", "ready", "serve"):
         assert client.post(f"/api/kitchen/{ticket}/{action}").status_code == 200
-    assert client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"}).status_code == 200
     closed = client.post(f"/api/orders/{oid}/close")
     assert closed.status_code == 200 and closed.json()["order"]["status"] == "closed"
     assert client.get("/api/tables").json()[1]["status"] == "available"
@@ -58,15 +59,49 @@ def test_complete_floor_kitchen_payment_close_workflow(client):
     assert receipt["total"] == 18
     assert receipt["issued_at"] != "2026-01-01T00:00:00Z"
 
+def test_served_order_cannot_be_paid_again_and_preserves_state(client):
+    oid, _ = lifecycle(client)
+    assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1}).status_code == 200
+    assert client.post(f"/api/orders/{oid}/confirm", json={"customer_name":"Mika"}).status_code == 200
+    paid = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+    assert paid.status_code == 200
+    ticket_id = paid.json()["ticket"]["id"]
+    for action in ("start", "ready", "serve"):
+        assert client.post(f"/api/kitchen/{ticket_id}/{action}").status_code == 200
+
+    before = client.get(f"/api/orders/{oid}").json()
+    assert before["order"]["status"] == "served"
+    assert before["payment"]["status"] == "paid"
+
+    rejected = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+
+    assert rejected.status_code == 409
+    after = client.get(f"/api/orders/{oid}").json()
+    assert after["order"] == before["order"]
+    assert after["payment"] == before["payment"]
+    assert after["ticket"] == before["ticket"]
+
 def test_invalid_actions_and_payment_rollback(client):
     oid, _ = lifecycle(client)
     assert client.post(f"/api/orders/{oid}/send").status_code == 409
     before = client.get(f"/api/orders/{oid}").json()
     assert client.post(f"/api/orders/{oid}/pay", json={"amount":1,"method":"cash"}).status_code == 409
     assert client.get(f"/api/orders/{oid}").json() == before
+    assert client.get("/api/kitchen").json() == []
     assert client.post("/api/tables/2/open").status_code == 409
     assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":999,"quantity":1}).status_code == 404
     assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":999}).status_code == 200
+
+def test_open_order_cannot_send_to_kitchen_and_preserves_state(client):
+    oid, _ = lifecycle(client)
+    client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1})
+    before = client.get(f"/api/orders/{oid}").json()
+
+    rejected = client.post(f"/api/orders/{oid}/send")
+
+    assert rejected.status_code == 409
+    assert client.get(f"/api/orders/{oid}").json() == before
+    assert client.get("/api/kitchen").json() == []
 
 def test_guided_counter_order_waits_for_payment_before_kitchen(client):
     created = client.post("/api/counter/orders")
@@ -89,6 +124,11 @@ def test_guided_counter_order_waits_for_payment_before_kitchen(client):
     assert paid.json()["order"]["status"] == "paid"
     ticket = paid.json()["ticket"]
     assert ticket["status"] == "queued"
+
+    repeated = client.post(f"/api/orders/{oid}/send")
+    assert repeated.status_code == 200
+    assert repeated.json()["ticket"] == ticket
+    assert len(client.get("/api/kitchen").json()) == 1
 
     for action in ("start", "ready", "serve"):
         assert client.post(f"/api/kitchen/{ticket['id']}/{action}").status_code == 200
@@ -131,8 +171,8 @@ def test_ready_queue_keeps_served_ticket_while_active_kitchen_queue_excludes_it(
 def test_foreign_keys_and_illegal_kitchen_transition(client):
     oid, _ = lifecycle(client)
     client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":3,"quantity":1})
-    client.post(f"/api/orders/{oid}/send")
-    ticket = client.get(f"/api/orders/{oid}").json()["ticket"]["id"]
+    client.post(f"/api/orders/{oid}/confirm", json={"customer_name":"Mika"})
+    ticket = client.post(f"/api/orders/{oid}/pay", json={"amount":5,"method":"cash"}).json()["ticket"]["id"]
     assert client.post(f"/api/kitchen/{ticket}/ready").status_code == 409
     with db.connect() as c:
         with pytest.raises(sqlite3.IntegrityError):
