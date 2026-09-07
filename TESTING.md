@@ -20,7 +20,8 @@ Expected result includes `"status":"ok"` and `"database_ready":true`.
 
 ## Current phase handoff
 
-- Backend tests: `9 passed`
+- Backend tests: `11 passed`
+- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
 - Frontend build: passed
 - Database: isolated temporary test databases
 - Phase status: awaiting developer approval

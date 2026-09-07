@@ -59,6 +59,28 @@ def test_complete_floor_kitchen_payment_close_workflow(client):
     assert receipt["total"] == 18
     assert receipt["issued_at"] != "2026-01-01T00:00:00Z"
 
+def test_served_order_cannot_be_paid_again_and_preserves_state(client):
+    oid, _ = lifecycle(client)
+    assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1}).status_code == 200
+    assert client.post(f"/api/orders/{oid}/confirm", json={"customer_name":"Mika"}).status_code == 200
+    paid = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+    assert paid.status_code == 200
+    ticket_id = paid.json()["ticket"]["id"]
+    for action in ("start", "ready", "serve"):
+        assert client.post(f"/api/kitchen/{ticket_id}/{action}").status_code == 200
+
+    before = client.get(f"/api/orders/{oid}").json()
+    assert before["order"]["status"] == "served"
+    assert before["payment"]["status"] == "paid"
+
+    rejected = client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"})
+
+    assert rejected.status_code == 409
+    after = client.get(f"/api/orders/{oid}").json()
+    assert after["order"] == before["order"]
+    assert after["payment"] == before["payment"]
+    assert after["ticket"] == before["ticket"]
+
 def test_invalid_actions_and_payment_rollback(client):
     oid, _ = lifecycle(client)
     assert client.post(f"/api/orders/{oid}/send").status_code == 409

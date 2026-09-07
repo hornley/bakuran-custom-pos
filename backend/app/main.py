@@ -247,7 +247,7 @@ def pay(oid:int,x:PaymentIn):
     try:
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]=="paid": c.commit(); return order_view(c, oid)
-        if o["status"] not in {"awaiting_payment", "served"}: fail("Order must be awaiting payment or served before payment",409)
+        if o["status"] != "awaiting_payment": fail("Order must be awaiting payment before payment",409)
         if abs(x.amount-o["total"])>0.001: fail("Payment amount must equal order total",409)
         stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,x.amount,x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
         if o["status"] == "awaiting_payment":
