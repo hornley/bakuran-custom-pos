@@ -1,7 +1,7 @@
 # Phase 2: Payment Gate
 
-**Status:** In implementation  
-**Branch:** `fix/phase-2-payment-gate`  
+**Status:** In implementation
+**Branch:** `fix/phase-2-payment-gate`
 **Base:** `main`
 
 ## Purpose
