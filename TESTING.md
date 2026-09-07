@@ -34,10 +34,24 @@ curl -fsS 'http://localhost:5300/api/kitchen?queue=ready'
 
 Supported values for `queue` are `active` and `ready`; other values return HTTP 422.
 
-## Current phase handoff
+## Frontend tests
 
-- Backend tests: `11 passed`
+Run the focused Vitest suite from the frontend directory:
+
+```bash
+cd frontend
+npm test
+```
+
+The suite uses mocked API responses and covers ready-queue selection, successful payment progression, and recoverable order-line errors. It does not replace a live browser/E2E check.
+
+## Current validation baseline
+
+- Backend tests: `17 passed` including Phase 3 lifecycle regressions
 - Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
-- Frontend build: passed
+- Ready/pickup regression: ready and served tickets remain visible until order close
+- Frontend build: `npm run build`
 - Database: isolated temporary test databases
-- Phase status: awaiting developer approval
+- Phase status: Phase 3 implementation in progress; developer approval is required before merge
+
+The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, and invalid kitchen transition conflicts without mutation.

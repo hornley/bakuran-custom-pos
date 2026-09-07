@@ -1,6 +1,6 @@
 # Phase 2: Payment Gate and Ready / Pickup Queue
 
-**Status:** Implemented; awaiting developer approval
+**Status:** Approved, merged, and shipped on `main`
 **Branch:** `fix/phase-2-payment-gate`
 **Base:** `main`
 
@@ -25,10 +25,11 @@ The earlier workflow test allowed an order to be sent while `open`, then paid af
 
 ## Verification
 
-- Focused backend payment-gate tests.
-- Full `./test.sh` checks, including backend pytest and frontend production build.
-- Final diff and branch status review.
+- Focused backend payment-gate tests rejected unpaid and served-order release attempts without mutation.
+- Full `./test.sh` checks passed, including backend pytest and frontend production build.
+- Ready/pickup queue filtering and served-ticket visibility were verified.
+- Final diff and branch status review completed.
 
 ## Approval gate
 
-This phase is not complete until the developer reviews and explicitly approves it. Do not merge this branch into `main`.
+The developer reviewed and explicitly approved this phase. It was merged into `main`; no further phase-2 merge is pending.

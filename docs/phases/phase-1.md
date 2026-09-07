@@ -1,6 +1,6 @@
 # Phase 1: POS P0 and Development Governance
 
-**Status:** Awaiting developer approval  
+**Status:** Approved and merged into `main`
 **Branch:** `docs/phase-1-governance`  
 **Base:** latest `main`
 
@@ -49,8 +49,8 @@ This phase is not complete until the developer reviews the branch and explicitly
 
 ## Handoff checklist
 
-- [ ] Developer reviewed `SPEC.md`.
-- [ ] Developer reviewed `AGENTS.md`.
-- [ ] Developer ran or reviewed `./test.sh`.
-- [ ] Developer approved the phase.
-- [ ] Approved branch merged into `main` with `--no-ff`.
+- [x] Developer reviewed `SPEC.md`.
+- [x] Developer reviewed `AGENTS.md`.
+- [x] Developer ran or reviewed `./test.sh`.
+- [x] Developer approved the phase.
+- [x] Approved branch merged into `main` with `--no-ff`.
