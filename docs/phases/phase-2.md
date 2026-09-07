@@ -1,6 +1,6 @@
-# Phase 2: Payment Gate
+# Phase 2: Payment Gate and Ready / Pickup Queue
 
-**Status:** In implementation
+**Status:** Implemented; awaiting developer approval
 **Branch:** `fix/phase-2-payment-gate`
 **Base:** `main`
 
@@ -15,6 +15,9 @@ Enforce the payment gate so unpaid orders never enter kitchen fulfillment.
 - Release a paid order to exactly one queued kitchen ticket.
 - Preserve idempotent behavior for repeated valid release/send requests.
 - Add backend integration coverage for rejection, no mutation, post-payment release, and idempotency.
+- Add a validated ready/pickup kitchen queue containing ready and served tickets until order close.
+- Update the frontend Ready view to request the ready/pickup queue.
+- Add backend coverage for ready/pickup filtering and served-ticket visibility.
 
 ## Contract correction
 

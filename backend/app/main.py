@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import sqlite3
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from .db import connect, initialize
@@ -119,8 +119,12 @@ def orders():
 def order_detail(oid: int):
     with connect() as c: return order_view(c, oid)
 @app.get("/api/kitchen")
-def kitchen():
-    with connect() as c: return rows(c, "SELECT k.*,o.order_number,o.customer_name,o.order_channel,t.code table_code FROM kitchen_tickets k JOIN restaurant_orders o ON o.id=k.order_id JOIN table_sessions s ON s.id=o.session_id JOIN dining_tables t ON t.id=s.table_id WHERE k.status!='served' ORDER BY k.id")
+def kitchen(queue: str = Query("active", pattern="^(active|ready)$")):
+    if queue == "ready":
+        status_filter = "k.status IN ('ready','served')"
+    else:
+        status_filter = "k.status!='served'"
+    with connect() as c: return rows(c, f"SELECT k.*,o.order_number,o.customer_name,o.order_channel,t.code table_code FROM kitchen_tickets k JOIN restaurant_orders o ON o.id=k.order_id JOIN table_sessions s ON s.id=o.session_id JOIN dining_tables t ON t.id=s.table_id WHERE o.status!='closed' AND {status_filter} ORDER BY k.id")
 @app.get("/api/dashboard")
 def dashboard():
     today_prefix = f"{now_iso()[:10]}%"
