@@ -258,7 +258,9 @@ export default function App() {
         ? `/api/payment-queue${search ? `?q=${encodeURIComponent(search)}` : ""}`
         : target === "operations"
           ? "/api/tables"
-          : "/api/kitchen";
+          : target === "ready"
+            ? "/api/kitchen?queue=ready"
+            : "/api/kitchen";
       const values = await api<Row[]>(path);
       setSecondary((current) => ({ ...current, [target]: values }));
       if (target === "operations") {

@@ -105,6 +105,28 @@ def test_table_order_creation_accepts_qr_channel_metadata(client):
     assert created.json()["order"]["customer_name"] == "Lia"
     assert created.json()["order"]["order_channel"] == "qr"
 
+def test_ready_queue_keeps_served_ticket_while_active_kitchen_queue_excludes_it(client):
+    oid, _ = lifecycle(client)
+    assert client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":1,"quantity":1}).status_code == 200
+    sent = client.post(f"/api/orders/{oid}/send")
+    ticket = sent.json()["ticket"]["id"]
+    for action in ("start", "ready", "serve"):
+        assert client.post(f"/api/kitchen/{ticket}/{action}").status_code == 200
+
+    active = client.get("/api/kitchen")
+    ready = client.get("/api/kitchen?queue=ready")
+
+    assert active.status_code == 200
+    assert all(row["id"] != ticket for row in active.json())
+    assert ready.status_code == 200
+    assert [row["id"] for row in ready.json()] == [ticket]
+    assert ready.json()[0]["status"] == "served"
+    assert client.get("/api/kitchen?queue=invalid").status_code == 422
+
+    assert client.post(f"/api/orders/{oid}/pay", json={"amount":18,"method":"cash"}).status_code == 200
+    assert client.post(f"/api/orders/{oid}/close").status_code == 200
+    assert client.get("/api/kitchen?queue=ready").json() == []
+
 def test_foreign_keys_and_illegal_kitchen_transition(client):
     oid, _ = lifecycle(client)
     client.post(f"/api/orders/{oid}/lines", json={"menu_item_id":3,"quantity":1})
