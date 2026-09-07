@@ -18,9 +18,25 @@ curl -fsS http://localhost:5300/api/health
 
 Expected result includes `"status":"ok"` and `"database_ready":true`.
 
+## Phase 2 ready / pickup queue
+
+The active kitchen queue is the default:
+
+```bash
+curl -fsS http://localhost:5300/api/kitchen
+```
+
+The ready / pickup queue includes ready and served tickets until their orders are closed:
+
+```bash
+curl -fsS 'http://localhost:5300/api/kitchen?queue=ready'
+```
+
+Supported values for `queue` are `active` and `ready`; other values return HTTP 422.
+
 ## Current phase handoff
 
-- Backend tests: `9 passed`
-- Frontend build: passed
+- Backend tests: pending final run
+- Frontend build: pending final run
 - Database: isolated temporary test databases
 - Phase status: awaiting developer approval
