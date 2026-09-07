@@ -1,0 +1,8 @@
+CREATE TABLE suppliers (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE customers (id INTEGER PRIMARY KEY, code TEXT NOT NULL UNIQUE, name TEXT NOT NULL, phone TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE purchases (id INTEGER PRIMARY KEY, purchase_number TEXT NOT NULL UNIQUE, supplier_id INTEGER NOT NULL REFERENCES suppliers(id), status TEXT NOT NULL CHECK(status IN ('draft','ordered','received','closed')), total REAL NOT NULL DEFAULT 0 CHECK(total >= 0), created_at TEXT NOT NULL, received_at TEXT);
+CREATE TABLE purchase_lines (id INTEGER PRIMARY KEY, purchase_id INTEGER NOT NULL REFERENCES purchases(id) ON DELETE CASCADE, product_id INTEGER NOT NULL REFERENCES menu_items(id), quantity INTEGER NOT NULL CHECK(quantity > 0), unit_cost REAL NOT NULL CHECK(unit_cost >= 0), UNIQUE(purchase_id, product_id));
+CREATE TABLE stock_movements (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES menu_items(id), movement_type TEXT NOT NULL CHECK(movement_type IN ('receipt','sale','adjustment')), quantity INTEGER NOT NULL CHECK(quantity != 0), reference TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE attendance (id INTEGER PRIMARY KEY, employee_name TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('in','out')), occurred_at TEXT NOT NULL);
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE notifications (id INTEGER PRIMARY KEY, title TEXT NOT NULL, message TEXT NOT NULL, read INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);

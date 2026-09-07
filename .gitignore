@@ -1,0 +1,22 @@
+backend/.venv/
+backend/data/*.db*
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+logs/*.log
+logs/*.pid
+frontend/.env.local
+
+# Local tooling and generated caches
+.superpowers/
+.vite/
+.pytest_cache/
+**/__pycache__/
+node_modules
+
+# Local tooling and generated caches
+.superpowers/
+.vite/
+.pytest_cache/
+**/__pycache__/
+node_modules
