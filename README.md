@@ -8,6 +8,13 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - Backend API: `0.0.0.0:5300`
 - Tailscale URLs: `http://100.108.61.26:5200` and `http://100.108.61.26:5300`
 
+## Project documentation
+
+- [`SPEC.md`](SPEC.md): current POS scope, workflows, API contracts, and acceptance criteria.
+- [`AGENTS.md`](AGENTS.md): database safety, phase lifecycle, branching, commits, and approval rules.
+- [`TESTING.md`](TESTING.md): short verification instructions for the current changes.
+- [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
+
 ## Run the project
 
 From the repository root:
