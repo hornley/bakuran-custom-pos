@@ -51,14 +51,22 @@ describe("counter operational flows", () => {
 
   it("keeps payment gated until an order has items, then advances after successful payment", async () => {
     const calls: string[] = [];
-    const paidOrder = { ...order, status: "paid", customer_name: "Mika", lines: [{ id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }], ticket: { id: 3, status: "queued" } };
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
+    const openOrder = { ...order, status: "open", lines: [] };
+    const orderWithItems = { ...openOrder, total: 12, lines: [line] };
+    const awaitingPaymentOrder = { ...orderWithItems, status: "awaiting_payment", customer_name: "Mika" };
+    const paidOrder = { ...awaitingPaymentOrder, status: "paid", ticket: { id: 3, status: "queued" } };
+    const paymentRequests: RequestInit[] = [];
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       calls.push(`${options?.method || "GET"} ${url}`);
       if (url.endsWith("/api/menu")) return response(menu);
-      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
-      if (url.endsWith("/lines")) return response({ order: paidOrder, lines: paidOrder.lines });
-      if (url.endsWith("/confirm")) return response({ order: { ...paidOrder, status: "confirmed" }, lines: paidOrder.lines });
-      if (url.endsWith("/pay")) return response({ order: paidOrder, lines: paidOrder.lines, ticket: paidOrder.ticket });
+      if (url.endsWith("/api/counter/orders")) return response({ order: openOrder, lines: [] });
+      if (url.endsWith("/lines")) return response({ order: orderWithItems, lines: orderWithItems.lines });
+      if (url.endsWith("/confirm")) return response({ order: awaitingPaymentOrder, lines: awaitingPaymentOrder.lines });
+      if (url.endsWith("/pay")) {
+        paymentRequests.push(options || {});
+        return response({ order: paidOrder, lines: paidOrder.lines, ticket: paidOrder.ticket });
+      }
       return response([]);
     });
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
@@ -70,14 +78,22 @@ describe("counter operational flows", () => {
     await settle();
     await act(async () => container.querySelector<HTMLButtonElement>(".basket-actions button")!.click());
     await settle();
+    expect(calls.some((call) => call.includes("POST http://localhost:5300/api/orders/7/pay"))).toBe(false);
     const name = container.querySelector<HTMLInputElement>("#customer-name")!;
-    await act(async () => { name.value = "Mika"; name.dispatchEvent(new Event("input", { bubbles: true })); name.dispatchEvent(new Event("change", { bubbles: true })); });
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setInputValue?.call(name, "Mika");
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await act(async () => button(container, "Continue to payment").click());
     await settle();
+    expect(calls.some((call) => call.includes("POST http://localhost:5300/api/orders/7/pay"))).toBe(false);
+    expect(button(container, "Record cash payment")).toBeTruthy();
     await act(async () => button(container, "Record cash payment").click());
     await settle();
 
-    expect(calls.some((call) => call.includes("POST http://localhost:5300/api/orders/7/pay"))).toBe(true);
+    expect(paymentRequests).toHaveLength(1);
+    expect(JSON.parse(String(paymentRequests[0].body))).toEqual({ amount: 12, method: "cash" });
     expect(container.textContent).toContain("Order is moving.");
     await act(async () => root.unmount());
   });

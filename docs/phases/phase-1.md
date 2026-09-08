@@ -43,9 +43,9 @@ Independent agent checks:
 
 The independent checks were run by separate swarm agents. Recursive spawning was unavailable in the light swarm, but no additional recursive reviewer was required for this phase.
 
-## Approval gate
+## Historical approval record
 
-This phase is not complete until the developer reviews the branch and explicitly approves it. Do not merge this branch into `main` before approval.
+The developer reviewed and explicitly approved this phase. It was merged into `main`; no phase-1 merge is pending.
 
 ## Handoff checklist
 
