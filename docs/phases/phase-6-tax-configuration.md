@@ -2,8 +2,7 @@
 
 **Status:** Implementation complete; developer approval is required before merge.
 **Branch:** `feat/tax-configuration`
-**Original base:** `57fe8f3` (`origin/main` before PR #4/#5)
-**Reconciled base:** `cd15a96` (`origin/main` after delivery and customer QR merges)
+**Reconciled base:** `f46bdab3e09551eff23753fbdde82c7868ca2635` (`origin/main` after inventory)
 
 ## Purpose
 
@@ -21,6 +20,9 @@ changing the payment gate or claiming external accounting/fiscal compliance.
 - Optional-auth permission checks, audit events, validation, and transactional updates.
 - Secondary front-desk UI for tax configuration and order/receipt tax visibility,
   while preserving the compact initial screen.
+- QR orders snapshot the effective server-side rule and tax-inclusive total when the
+  public order is created. Payment defensively snapshots a legacy QR `awaiting_payment`
+  row that has no snapshot before validating the amount, so pre-fix rows cannot bypass tax.
 
 ## Non-goals
 
@@ -29,20 +31,25 @@ changing the payment gate or claiming external accounting/fiscal compliance.
 - Promotions, refunds, voids, cancellations, split payments, or multi-tenant deployment.
 - Inventory deduction or purchasing behavior changes.
 
-## Dependency decision
+## Data and transaction notes
 
-This track starts from `origin/main` rather than the unmerged inventory or delivery branches.
-Tax calculation depends only on the existing order/payment/receipt schema; it does not require
-warehouse or delivery records. Promotions will depend on this track's tax snapshot contract.
-The current deployment remains single-store; tenant isolation is not being claimed.
+The reconciled branch is based on `f46bdab3e09551eff23753fbdde82c7868ca2635` and applies
+migrations `001` through `007` in order, including `006_inventory_purchasing.sql` and
+`007_tax_configuration.sql`. QR order creation and the legacy payment fallback use the
+existing `BEGIN IMMEDIATE` transaction boundary and select the effective rule on the server;
+client-provided tax or totals are never trusted. Existing non-QR historical completed rows
+remain immutable zero-tax history when a later rule is configured. New orders with no active
+rule preserve the zero-tax total.
 
 ## Acceptance criteria
 
 - Existing zero-tax behavior remains compatible when no active tax rule is configured.
 - A configured effective tax rule is selected server-side, not trusted from the client.
 - Exclusive and inclusive tax calculations use `Decimal` and explicit half-up cent rounding.
-- Order confirmation/recalculation snapshots the selected rule, taxable subtotal, tax amount,
-  and total; payment amount validation uses the tax-inclusive order total.
+- Manual/delivery confirmation and QR order creation snapshot the selected rule, taxable
+  subtotal, tax amount, and total; payment amount validation uses the tax-inclusive order total.
+- Payment defensively snapshots a QR `awaiting_payment` order with no snapshot before amount
+  validation, covering rows created before the QR tax integration.
 - Closing an order issues exactly one receipt with the immutable tax snapshot.
 - Configuration mutations require manager/admin when local auth is enabled, are audited, and
   reject invalid rates/date ranges and conflicting active effective rules.
@@ -56,11 +63,10 @@ The current deployment remains single-store; tenant isolation is not being claim
 
 ## Verification
 
-- Focused tax/QR/delivery backend tests: `59 passed`.
-- Full `./test.sh`: `86 passed` backend, `14 passed` frontend tests in 3 files, and production build passed.
-- Frontend dependency setup: `npm ci` installed the checked-in `@testing-library/react` dependency into the isolated worktree.
+- Full `./test.sh`: `121 passed` backend, `16 passed` frontend tests in 3 files, and production build passed.
+- Focused tax/QR/delivery/inventory/auth backend suites: `103 passed`.
+- Fresh isolated migration/reset and endpoint smoke passed with migration versions `1, 2, 3, 4, 5, 6, 7`; health, tax configuration, QR order creation/payment, and delivery routes returned expected responses.
 - `git diff --check` passed.
-- Fresh isolated migration smoke check passed with versions `1, 2, 3, 4, 5, 7`; health, tax configuration, and delivery routes returned HTTP 200.
 - No live browser/E2E or external courier integration was exercised.
 
 ## Approval gate

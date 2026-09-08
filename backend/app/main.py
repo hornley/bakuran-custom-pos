@@ -544,13 +544,24 @@ def create_customer_order(c, session, payload, idempotency_key):
     stamp = now_iso()
     order_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM restaurant_orders").fetchone()[0]
     c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel,client_idempotency_key,idempotency_fingerprint) VALUES(?,?,?,'awaiting_payment',0,0,?,NULL,NULL,NULL,NULL,?,'qr',?,?)", (order_id, f"ORD-{order_id:04d}", session["id"], stamp, payload.customer_name, idempotency_key, fingerprint))
-    total = 0
+    total = Decimal("0.00")
     for line in payload.lines:
         item = menu_by_id[line.menu_item_id]
-        line_total = line.quantity * item["price"]
+        line_total = calculate_line_total(item["price"], line.quantity)
         total += line_total
-        c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)", (order_id, item["id"], item["name"], line.quantity, item["price"], line_total))
-    c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=?", (total, total, order_id))
+        c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)", (order_id, item["id"], item["name"], line.quantity, item["price"], str(line_total)))
+    total = quantize_money(total, "Order total")
+    c.execute("UPDATE restaurant_orders SET subtotal=?, total=? WHERE id=?", (str(total), str(total), order_id))
+    snapshot = order_tax_snapshot(c, c.execute("SELECT * FROM restaurant_orders WHERE id=?", (order_id,)).fetchone(), stamp)
+    snapshot_values_without_total = snapshot_values(snapshot)[:6] + snapshot_values(snapshot)[7:]
+    c.execute(
+        """
+        UPDATE restaurant_orders
+        SET total=?, tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
+        WHERE id=?
+        """
+        , (str(snapshot["total"]), *snapshot_values_without_total, order_id),
+    )
     return customer_order_view(c, order_id)
 
 def create_ticket(c, order_id, stamp=None):
@@ -1203,6 +1214,17 @@ def pay(oid:int,x:PaymentIn):
             "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
         ).fetchone():
             fail("Delivery address and contact are required before payment", 422)
+        if o["order_channel"] == "qr" and not o["tax_snapshot_at"]:
+            snapshot = order_tax_snapshot(c, o, now_iso())
+            c.execute(
+                """
+                UPDATE restaurant_orders
+                SET tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, total=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
+                WHERE id=?
+                """
+                , (*snapshot_values(snapshot)[:6], str(snapshot["total"]), *snapshot_values(snapshot)[7:], oid),
+            )
+            o = get(c, "restaurant_orders", oid)
         amount = quantize_money(x.amount, "Payment amount")
         if amount != quantize_money(o["total"], "Order total"):
             fail("Payment amount must equal order total",409)

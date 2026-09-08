@@ -74,7 +74,7 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 
 ## Customer QR ordering checks
 
-The QR backend tests cover session-scoped hashed tokens, invalid and closed tokens, cross-session isolation, active-menu filtering, bounded names and baskets, server-side price revalidation, one active QR order per session, transaction rollback, concurrent idempotent retries, payload conflicts, CORS preflight, and operator-auth boundaries.
+The QR backend tests cover session-scoped hashed tokens, invalid and closed tokens, cross-session isolation, active-menu filtering, bounded names and baskets, server-side price revalidation, one active QR order per session, transaction rollback, concurrent idempotent retries, payload conflicts, CORS preflight, operator-auth boundaries, tax snapshots at QR creation, and defensive tax snapshots for legacy awaiting-payment QR rows.
 
 The auth boundary tests verify that `/api/health` and `/api/auth/*` remain public in the shipped disabled profile, that explicit `AUTH_LOCAL_DEV_BYPASS=true` preserves the legacy open desk, and that `AUTH_PROFILE=local` with `AUTH_ENABLED=true` preserves login, role, and CSRF enforcement.
 
@@ -111,6 +111,6 @@ cd backend
 .venv/bin/python -m pytest -q tests/test_tax_math.py tests/test_tax_configuration.py tests/test_tax_auth.py
 ```
 
-The focused tax command verifies Decimal rounding, configuration authorization, snapshots, and no-mutation rejection for oversized payment and order-line values. Monetary values are bounded to `9999999999.99`; each order-line quantity is bounded to `999999999` before Decimal totals are calculated.
+The focused tax command verifies Decimal rounding, configuration authorization, manual and QR snapshots, defensive legacy QR payment snapshotting, and no-mutation rejection for oversized payment and order-line values. Monetary values are bounded to `9999999999.99`; each order-line quantity is bounded to `999999999` before Decimal totals are calculated.
 
 The default fixture uses the checked-in unauthenticated local deployment contract. The auth test explicitly opts into `AUTH_PROFILE=local`/`AUTH_ENABLED=true` with temporary bootstrap credentials and verifies manager/admin configuration access and operator denial. No credentials or operational database are used by the test.

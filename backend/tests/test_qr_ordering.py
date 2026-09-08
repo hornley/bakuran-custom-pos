@@ -1,5 +1,6 @@
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 import pytest
 from app import auth, db
@@ -92,6 +93,76 @@ def test_customer_menu_endpoint_returns_only_active_items_and_categories(client)
 
     assert response.status_code == 200
     assert [item["name"] for item in response.json()] == ["House Burger", "Garden Pasta"]
+
+
+def test_customer_order_snapshots_configured_tax_and_payment_uses_inclusive_total(client):
+    configured = client.post(
+        "/api/tax/configuration",
+        json={
+            "name": "VAT",
+            "rate": "10",
+            "policy": "exclusive",
+            "effective_from": "2020-01-01",
+        },
+    )
+    assert configured.status_code == 201
+    _, token = open_qr_table(client)
+
+    created = submit(client, token, key="qr-tax")
+
+    assert created.status_code == 200
+    order = client.get(f"/api/orders/{created.json()['order']['id']}").json()["order"]
+    assert order["status"] == "awaiting_payment"
+    assert order["tax_policy"] == "exclusive"
+    assert order["tax_rate"] == "10"
+    assert Decimal(str(order["taxable_subtotal"])) == Decimal("18.00")
+    assert Decimal(str(order["tax_amount"])) == Decimal("1.80")
+    assert Decimal(str(order["total"])) == Decimal("19.80")
+    assert order["tax_rule_id"] == configured.json()["id"]
+    assert order["tax_snapshot_at"]
+
+    assert client.post(f"/api/orders/{order['id']}/pay", json={"amount": "18.00", "method": "cash"}).status_code == 409
+    paid = client.post(f"/api/orders/{order['id']}/pay", json={"amount": "19.80", "method": "cash"})
+    assert paid.status_code == 200
+    assert Decimal(str(paid.json()["payment"]["amount"])) == Decimal("19.80")
+
+
+def test_qr_payment_snapshots_legacy_awaiting_order_before_validation(client):
+    _, token = open_qr_table(client)
+    created = submit(client, token, key="legacy-qr-tax")
+    order_id = created.json()["order"]["id"]
+    with db.connect() as connection:
+        connection.execute(
+            "UPDATE restaurant_orders SET tax_rule_id=NULL, tax_name='', tax_rate='0.00', tax_policy='none', taxable_subtotal='0.00', tax_amount='0.00', tax_snapshot_at=NULL, tax_effective_from=NULL, tax_effective_to=NULL WHERE id=?",
+            (order_id,),
+        )
+    configured = client.post(
+        "/api/tax/configuration",
+        json={
+            "name": "VAT",
+            "rate": "10",
+            "policy": "exclusive",
+            "effective_from": "2020-01-01",
+        },
+    )
+    assert configured.status_code == 201
+
+    assert client.post(f"/api/orders/{order_id}/pay", json={"amount": "18.00", "method": "cash"}).status_code == 409
+    paid = client.post(f"/api/orders/{order_id}/pay", json={"amount": "19.80", "method": "cash"})
+    assert paid.status_code == 200
+    with db.connect() as connection:
+        order = connection.execute(
+            "SELECT tax_rule_id, tax_policy, tax_rate, taxable_subtotal, tax_amount, total, tax_snapshot_at, status FROM restaurant_orders WHERE id=?",
+            (order_id,),
+        ).fetchone()
+    assert order["tax_rule_id"] == configured.json()["id"]
+    assert order["tax_policy"] == "exclusive"
+    assert order["tax_rate"] == "10"
+    assert Decimal(str(order["taxable_subtotal"])) == Decimal("18.00")
+    assert Decimal(str(order["tax_amount"])) == Decimal("1.80")
+    assert Decimal(str(order["total"])) == Decimal("19.80")
+    assert order["tax_snapshot_at"]
+    assert order["status"] == "paid"
 
 
 def test_customer_order_is_awaiting_payment_and_idempotent(client):

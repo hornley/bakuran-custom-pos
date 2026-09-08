@@ -138,7 +138,7 @@ Important POS mutations include counter order creation, order lines, order confi
 
 The desk is zero-tax compatible when no rule is active. Tax rules are created from the secondary Operations view or `POST /api/tax/configuration`; the server validates decimal rates (`0`–`100`), inclusive/exclusive policy, and non-overlapping inclusive effective date ranges. Confirmation snapshots the effective rule and calculates tax with `Decimal` half-up cent rounding. Payment must equal the tax-inclusive total, and receipts retain the same immutable snapshot.
 
-Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order; only the authenticated front desk can record cash and release that order to kitchen.
+- Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order with the server-selected tax snapshot and tax-inclusive total; only the authenticated front desk can record cash and release that order to kitchen. Payment defensively snapshots legacy QR awaiting-payment rows that lack a snapshot before validating the amount, so pre-fix rows cannot bypass configured tax.
 
 Delivery mutations are payment-gated, use transaction-safe guarded transitions, preserve assignment history, and accept only cash. `Idempotency-Key` is supported for assignment and staff transition retries; callback identifiers make repeated local callback deliveries safe. Delivery audit events are available from `/api/audit-events`.
 

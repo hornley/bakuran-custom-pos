@@ -146,8 +146,10 @@ def order_tax_snapshot(connection: sqlite3.Connection, order: sqlite3.Row, snaps
         }
     # Orders created before tax snapshots were introduced have the migration
     # defaults (policy=none, no snapshot). They are historical records and
-    # must not acquire a rule merely because one is configured later.
-    if order["tax_policy"] == "none" and order["status"] != "open":
+    # must not acquire a rule merely because one is configured later. QR orders
+    # are the exception: they were introduced through the public flow and may
+    # already be awaiting payment when this snapshot contract is deployed.
+    if order["tax_policy"] == "none" and order["status"] != "open" and order["order_channel"] != "qr":
         return tax_snapshot(connection, order["subtotal"], None, snapshot_at)
     rule = effective_rule(connection, snapshot_at[:10])
     return tax_snapshot(connection, order["subtotal"], rule, snapshot_at)
