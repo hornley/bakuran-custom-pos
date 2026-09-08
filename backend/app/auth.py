@@ -179,6 +179,38 @@ def _record_event(connection: sqlite3.Connection, actor_user_id: int | None, eve
     )
 
 
+def _ensure_audit_actor_foreign_key(connection: sqlite3.Connection) -> None:
+    foreign_keys = connection.execute("PRAGMA foreign_key_list(audit_events)").fetchall()
+    if any(row["table"] == "auth_users" and row["from"] == "actor_user_id" for row in foreign_keys):
+        return
+    connection.execute("DROP TABLE IF EXISTS audit_events_with_actor_fk")
+    connection.execute(
+        """
+        CREATE TABLE audit_events_with_actor_fk (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id INTEGER REFERENCES auth_users(id) ON DELETE SET NULL,
+            event_type TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO audit_events_with_actor_fk(id,actor_user_id,event_type,path,detail,created_at)
+        SELECT id,
+               CASE WHEN actor_user_id IS NULL OR EXISTS (SELECT 1 FROM auth_users WHERE id=actor_user_id)
+                    THEN actor_user_id ELSE NULL END,
+               event_type,path,detail,created_at
+        FROM audit_events
+        """
+    )
+    connection.execute("DROP TABLE audit_events")
+    connection.execute("ALTER TABLE audit_events_with_actor_fk RENAME TO audit_events")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at)")
+
+
 def record_event(actor_user_id: int | None, event_type: str, path: str = "", detail: str = "") -> None:
     with connect() as connection:
         _record_event(connection, actor_user_id, event_type, path, detail)
@@ -210,8 +242,10 @@ def initialize_auth() -> None:
                 )
                 """
             )
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at)")
             return
         connection.executescript(AUTH_SCHEMA)
+        _ensure_audit_actor_foreign_key(connection)
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()}
         if "csrf_hash" not in columns:
             connection.execute("ALTER TABLE auth_sessions ADD COLUMN csrf_hash TEXT NOT NULL DEFAULT ''")

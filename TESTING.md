@@ -24,7 +24,18 @@ The frontend also has a focused Vitest check for the secondary delivery board:
 cd frontend && npm test
 ```
 
-The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database. Tax and authentication tests also use isolated temporary databases.
+The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database. Tax, authentication, and inventory tests also use isolated temporary databases.
+
+For the phase-4 vertical slice, run the focused backend suite and frontend tests directly:
+
+```bash
+cd backend && .venv/bin/python -m pytest -q tests/test_inventory_purchasing.py
+cd frontend && npm test
+cd frontend && npm run build
+git diff --check
+```
+
+The focused backend tests cover warehouse/product validation, low-stock and reorder levels, reasoned signed adjustments, partial and over-receipts, per-line completion, multi-line rollback, durable idempotency and concurrent retries, optional-auth role denial/authorization, database constraints, and audit records. The frontend tests confirm that Operations remains secondary, inventory/purchasing/audit endpoints are wired, and the responsive safety-critical controls remain present.
 
 For a read-only service check when the app is already running:
 
@@ -59,7 +70,7 @@ cd frontend
 npm test
 ```
 
-The suite uses mocked API responses and covers ready-queue selection, successful payment progression, recoverable order-line errors, server-provided tax breakdown rendering, secondary tax configuration submission, delivery header preservation, delivery draft reset behavior, and the delivery board. It does not replace a live browser/E2E check.
+The suite uses mocked API responses and covers ready-queue selection, successful payment progression, recoverable order-line errors, Operations loading boundaries, server-provided tax breakdown rendering, secondary tax configuration submission, selected partial/over-receipt payloads, the public QR route, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, recoverable customer API errors, delivery-board rendering, delivery metadata reset, and delivery mutation headers. It does not replace a live browser/E2E check.
 
 ## Customer QR ordering checks
 
@@ -67,7 +78,7 @@ The QR backend tests cover session-scoped hashed tokens, invalid and closed toke
 
 The auth boundary tests verify that `/api/health` and `/api/auth/*` remain public in the shipped disabled profile, that explicit `AUTH_LOCAL_DEV_BYPASS=true` preserves the legacy open desk, and that `AUTH_PROFILE=local` with `AUTH_ENABLED=true` preserves login, role, and CSRF enforcement.
 
-The frontend tests cover the public route parser, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, recoverable API errors, tax rendering/configuration, delivery request headers, and delivery draft reset behavior. The browser flow should be checked against an isolated temporary database; do not open a table or submit an order against `backend/data/app.db`.
+The frontend tests cover the public route parser, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, recoverable API errors, tax rendering/configuration, Operations loading boundaries, selected partial/over-receipt payloads, delivery request headers, and delivery draft reset behavior. The browser flow should be checked against an isolated temporary database; do not open a table or submit an order against `backend/data/app.db`.
 
 ## Phase 5 delivery workflow
 
@@ -82,18 +93,16 @@ git diff --check
 
 The suite covers delivery-channel creation, address/contact/contact-name validation, metadata isolation, payment and cash-only gates, invalid transition rollback, active-driver assignment and reassignment history, duplicate callbacks and idempotency-key conflicts, failed/cancelled outcomes, optional-auth viewer denial with audit evidence, and delivery audit records. The board is a local operational view; this phase intentionally has no external courier, webhook, driver app, GPS, or route-optimization integration.
 
+## Inventory and purchasing checks
+
+The focused inventory backend tests cover warehouse/product validation, low-stock and reorder levels, reasoned signed adjustments, partial and over-receipts, per-line completion, multi-line rollback, durable idempotency and concurrent retries, optional-auth role denial/authorization, database constraints, and audit records. The frontend tests confirm that Operations remains secondary, inventory/purchasing/audit endpoints are wired, and the responsive safety-critical controls remain present.
+
 ## Current validation baseline
 
-- Backend tests: run `./test.sh` for the current count
-- Focused tax pytest: run the tax-focused command below
-- Focused QR/delivery pytest: run the focused command above
-- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
-- Ready/pickup regression: ready and served tickets remain visible until order close
-- Frontend tests and build: run `./test.sh`
-- Database: isolated temporary test databases
-- Phase status: Phase 6 implementation complete; developer approval is required before merge
-
-The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, invalid kitchen transition conflicts without mutation, tax effective-date selection, invalid/overlapping rules, Decimal half-up boundaries, historical tax snapshots, receipt lifecycle, local-auth permissions, QR token/idempotency boundaries, delivery transitions, and isolated reset/migration safety.
+- Run `./test.sh` for the current integrated backend count, frontend tests, and production build.
+- Run `git diff --check`.
+- Backend tests use isolated temporary SQLite databases; never point tests at `backend/data/app.db`.
+- No live browser/E2E or external courier integration is exercised by these tests; frontend tests use mocked fetch responses.
 
 ## Tax-focused checks
 

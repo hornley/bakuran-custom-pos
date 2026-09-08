@@ -41,7 +41,8 @@ There is no payment gateway. Payments are recorded by front-desk staff as cash t
 - Let staff identify pickup orders by customer name and order number.
 - Keep QR orders connected to the front desk without requiring scanning or manual order-number typing.
 - Keep operational reference views secondary to order entry.
-- Do not introduce inventory or purchasing work into the POS flow.
+- Keep inventory and purchasing work in the secondary Operations workspace; it must not block POS ordering, payment, or kitchen release.
+- Do not introduce inventory or purchasing work into the sequential POS order flow.
 - Require delivery address and contact metadata before confirmation or payment.
 - Keep delivery status changes transaction-safe and replay-safe when callbacks or staff retries repeat.
 
@@ -75,6 +76,10 @@ Kitchen staff can use the kitchen queue to advance paid orders through preparati
 
 The customer-facing QR route is available at `/qr/<token>`. A customer can browse the active menu for the open table session, choose a basket, provide a bounded calling name, and submit one unpaid QR order. The order is connected to the authenticated front-desk payment queue; customers do not log in and do not pay online.
 
+### Operations staff and local authentication
+
+Inventory and purchasing are optional back-office capabilities. With local authentication disabled, the local deployment keeps the existing unauthenticated workflow. When local authentication is enabled, authenticated operators can perform normal operational mutations, viewers are read-only, and over-receipt overrides require a `manager` or `admin` role. Audit events record the authenticated actor when one exists.
+
 ## 4. Front-desk UI
 
 ### 4.1 Initial screen
@@ -94,7 +99,7 @@ It must not preload:
 - Historical receipts.
 - Dashboard metrics.
 - Kitchen history.
-- Inventory or purchasing data.
+- Inventory or purchasing data. Those resources load only after `Operations` is selected.
 
 Delivery is opened through a secondary `Delivery` route and is not preloaded on the compact first screen.
 
@@ -251,23 +256,38 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `GET /api/kitchen` | List kitchen tickets |
 | `GET /api/receipts` | List sales receipts with immutable tax snapshots |
 | `GET /api/tables` | Secondary operations reference |
-| `GET /api/customer/tables/{token}` | Public session-scoped table context and active menu |
-| `GET /api/customer/tables/{token}/menu` | Public active menu for a table session |
-| `POST /api/customer/tables/{token}/orders` | Public QR order submission; requires `Idempotency-Key` |
-| `GET /api/customer/tables/{token}/orders/{order_id}` | Public QR order status scoped to the same token/session |
-| `POST /api/orders/{order_id}/delivery` | Validate and save delivery address/contact metadata |
-| `GET /api/delivery` | List delivery board records, optionally filtered by status |
-| `GET /api/delivery/drivers` | List active delivery drivers |
-| `GET /api/delivery/{delivery_id}` | Load one delivery with driver and assignment history |
-| `POST /api/delivery/{delivery_id}/assign` | Assign or reassign an active driver |
-| `POST /api/delivery/{delivery_id}/out-for-delivery` | Guarded dispatch transition |
-| `POST /api/delivery/{delivery_id}/delivered` | Guarded delivery completion transition |
-| `POST /api/delivery/{delivery_id}/failed` | Record a failed delivery with a reason |
-| `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
-| `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
-| `GET /api/audit-events` | Review audit events for delivery and auth actions |
-| `GET /api/tax/configuration` | List tax rules and the rule effective today |
-| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+|| `GET /api/warehouses` | List active warehouse scopes |
+|| `POST /api/warehouses` | Create an active warehouse scope |
+|| `GET /api/inventory` | List warehouse-scoped stock and movements |
+|| `GET /api/inventory/low-stock` | List stock at or below reorder level |
+|| `GET /api/inventory/reorder` | Compatibility alias for low-stock visibility |
+|| `PUT /api/inventory/reorder-level` | Set a product/warehouse reorder level |
+|| `POST /api/stock/adjustment` | Apply a reasoned signed stock adjustment |
+|| `GET /api/purchases` | List purchases with receipt progress per line |
+|| `POST /api/purchases` | Create a draft purchase |
+|| `POST /api/purchases/{purchase_id}/lines` | Add a validated product/warehouse line to a draft |
+|| `POST /api/purchases/{purchase_id}/order` | Move a draft purchase to ordered |
+|| `POST /api/purchases/{purchase_id}/receive` | Receive selected quantities, including partial receipts |
+|| `POST /api/purchases/{purchase_id}/close` | Close a fully received purchase |
+|| `GET /api/customer/tables/{token}` | Public session-scoped table context and active menu |
+|| `GET /api/customer/tables/{token}/menu` | Public active menu for a table session |
+|| `POST /api/customer/tables/{token}/orders` | Public QR order submission; requires `Idempotency-Key` |
+|| `GET /api/customer/tables/{token}/orders/{order_id}` | Public QR order status scoped to the same token/session |
+|| `POST /api/orders/{order_id}/delivery` | Validate and save delivery address/contact metadata |
+|| `GET /api/delivery` | List delivery board records, optionally filtered by status |
+|| `GET /api/delivery/drivers` | List active delivery drivers |
+|| `GET /api/delivery/{delivery_id}` | Load one delivery with driver and assignment history |
+|| `POST /api/delivery/{delivery_id}/assign` | Assign or reassign an active driver |
+|| `POST /api/delivery/{delivery_id}/out-for-delivery` | Guarded dispatch transition |
+|| `POST /api/delivery/{delivery_id}/delivered` | Guarded delivery completion transition |
+|| `POST /api/delivery/{delivery_id}/failed` | Record a failed delivery with a reason |
+|| `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
+|| `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
+|| `GET /api/audit-events` | Review audit events for inventory, purchasing, delivery, and auth actions |
+|| `GET /api/tax/configuration` | List tax rules and the rule effective today |
+|| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+
+The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it records a draft as ordered, receives all outstanding lines, and returns the historical purchase-row response. The legacy `POST /api/stock/receipt` endpoint remains available and supports an optional idempotency key for safe retries.
 
 ### Order metadata
 
@@ -301,22 +321,27 @@ Orders support:
   ranges are inclusive; overlapping ranges are rejected, while adjacent date
   ranges are allowed.
 - All tax and payment amounts use `Decimal`, with explicit half-up rounding to
-  cents. Exclusive tax is calculated from the pre-tax subtotal; inclusive tax
-  extracts the tax from the tax-inclusive total.
+  cents. Exclusive tax is calculated from the pre-tax subtotal; inclusive tax extracts the tax from the tax-inclusive total.
 - Confirmation copies the selected rule and calculated taxable subtotal, tax,
   and total to the order. Payment must equal that tax-inclusive total to the
   cent, and payment still gates kitchen release.
 - Closing copies the order tax snapshot into exactly one immutable receipt.
   Later rule changes cannot alter historical orders or receipts.
 - If no rule is effective, the existing zero-tax total is preserved. Records
-  created before this migration remain zero-tax and are not retroactively
-  recalculated.
-- With the checked-in `auth_profile: disabled` deployment, local API access is
-  intentionally unauthenticated so the existing local desk still opens
-  directly. Setting `AUTH_PROFILE=local` and `AUTH_ENABLED=true` enables the
-  existing local-session middleware; tax configuration then requires a manager
-  or administrator and uses CSRF protection. This is local authentication,
-  not hosted identity, SSO, MFA, or a compliance certification.
+  created before this migration remain zero-tax and are not retroactively recalculated.
+- With the checked-in `auth_profile: disabled` deployment, local API access is intentionally unauthenticated so the existing local desk still opens directly. Setting `AUTH_PROFILE=local` and `AUTH_ENABLED=true` enables the existing local-session middleware; tax configuration then requires a manager or administrator and uses CSRF protection. This is local authentication, not hosted identity, SSO, MFA, or a compliance certification.
+
+### Inventory and purchasing contract
+
+- Every stock row is scoped by an active product and active warehouse. The database also enforces product/warehouse foreign keys and `on_hand >= reserved >= 0`.
+- Inventory responses expose `on_hand`, `reserved`, `available`, `reorder_level`, `low_stock`, and `reorder_quantity`. Low stock is `available <= reorder_level`.
+- A stock adjustment requires a non-zero signed quantity and a non-blank reason. It is atomic and cannot make on-hand stock negative or lower than reserved stock.
+- Purchase status follows `draft -> ordered -> partially_received -> received -> closed`. Draft lines require active product and warehouse references and have positive quantity and non-negative unit cost.
+- Each purchase line tracks `received_quantity`. A receipt validates every line before mutating any inventory, so a multi-line failure rolls back all lines.
+- A receipt cannot exceed a line's ordered quantity unless `allow_over_receipt=true`, a non-blank `override_reason` is supplied, and local auth (when enabled) identifies a `manager` or `admin` actor.
+- Explicit idempotency keys are persisted with a request fingerprint and response. Repeating the same operation replays the stored response; reusing a key with a different operation or payload returns a conflict.
+- Inventory and purchasing mutations write audit events in the same transaction. Optional-auth requests record a null actor; authenticated requests record the local user id.
+- The POS does not automatically reserve, deplete, or gate menu sales on inventory in this phase. The payment gate remains authoritative: unpaid orders cannot enter the kitchen.
 
 ## 7. Error and recovery behavior
 
@@ -341,14 +366,13 @@ Orders support:
 The current POS does not include:
 
 - Payment gateway integration.
-- Inventory management or stock mutation.
-- Purchasing or supplier workflows.
 - Order cancellation, voids, or refunds.
-- Staff accounts, permissions, or attendance management beyond the existing optional local-auth boundary.
+- Hosted identity and staff administration beyond the optional local-auth module.
 - Automatic customer notifications.
 - External courier, driver, GPS, route-optimization, webhook, or online-delivery integration.
 - Delivery refunds, cash-on-delivery collection, or settlement workflows.
-- Multi-store or multi-location synchronization; the QR route and payment queue use the single local SQLite store.
+- Multi-store or multi-location synchronization; the QR route, delivery board, and payment queue use the single local SQLite store.
+- Recipe-level stock depletion, automatic sale reservations, tax, discounts, or purchase invoicing.
 
 ## 9. Acceptance criteria
 
@@ -375,6 +399,17 @@ The current POS does not include:
 5. Staff records cash payment.
 6. The existing order number is preserved.
 7. The paid order enters the kitchen with its table context when available.
+
+### Inventory and purchasing
+
+1. Staff opens `Operations` as a secondary route; the compact counter entry screen does not load inventory or purchasing data.
+2. Stock is filtered by an active warehouse and exposes low-stock rows using available quantity versus reorder level.
+3. A signed stock adjustment requires a reason and preserves non-negative, non-reserved stock.
+4. A purchase moves through draft, ordered, partially received, received, and closed states.
+5. Each receipt updates only the selected purchase-line quantities and supports a later partial receipt.
+6. Over-receipt is rejected unless the request includes a reason and, when auth is enabled, a manager/admin actor.
+7. A failed multi-line receipt leaves every inventory row, purchase line, movement, and audit event unchanged.
+8. Repeated idempotent requests replay once without double-mutating inventory; payload conflicts return a conflict.
 
 ### Customer QR submission
 
@@ -425,7 +460,9 @@ Run validation:
 
 ```bash
 cd backend && .venv/bin/python -m pytest -q
-cd frontend && npm run build
+cd frontend && npm test && npm run build
 ```
 
 The application can be hosted on `0.0.0.0` for access from another device using the host machine's LAN or tailnet address.
+
+Inventory and purchasing are intentionally single-store in this phase. Warehouse IDs scope stock within the store, but there is no multi-location synchronization, transfer workflow, or cross-store reporting.
