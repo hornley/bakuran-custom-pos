@@ -243,10 +243,8 @@ def _delivery_payment_required(c, delivery_id: int):
     order = get(c, "restaurant_orders", delivery["order_id"])
     if order["order_channel"] != "delivery":
         fail("Delivery metadata belongs to a non-delivery order", 409)
-    if order["status"] != "paid":
-        fail("Cash payment is required before delivery assignment", 409)
     if not c.execute("SELECT 1 FROM payments WHERE order_id = ? AND status = 'paid'", (order["id"],)).fetchone():
-        fail("Paid delivery order has no payment", 409)
+        fail("Cash payment is required before delivery assignment", 409)
     return delivery, order
 def order_view(c, oid):
     o = get(c, "restaurant_orders", oid)
@@ -551,10 +549,7 @@ def _transition_delivery(
                 "UPDATE delivery_assignments SET status = ?, unassigned_at = ? WHERE delivery_id = ? AND status = 'active'",
                 (assignment_status, stamp, delivery_id),
             )
-        detail = f"delivery_id={delivery_id}"
-        if reason:
-            detail += f" reason={reason}"
-        _delivery_audit(c, request, event_type, detail)
+        _delivery_audit(c, request, event_type, f"delivery_id={delivery_id}")
         response = delivery_view(c, delivery_id)
         _idempotency_store(c, delivery_id, operation, key, request_hash, response)
         c.commit()

@@ -153,6 +153,11 @@ export default function App() {
       setBusy("delivery-start");
       setError("");
       setNotice("");
+      setCustomerName("");
+      setDeliveryAddress("");
+      setDeliveryContact("");
+      setDeliveryContactName("");
+      setQuantities({});
       const payload = await api<Row>("/api/counter/orders", { method: "POST", body: JSON.stringify({ order_channel: "delivery" }) });
       applyOrderPayload(payload);
       setOrderMode("delivery");

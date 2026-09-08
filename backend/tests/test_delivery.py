@@ -176,6 +176,23 @@ def test_delivery_transitions_are_guarded_and_idempotent(client):
     assert client.get(f"/api/orders/{oid}").json()["delivery"]["status"] == "delivered"
 
 
+def test_paid_delivery_actions_remain_available_after_kitchen_served(client):
+    oid, delivery_id = _pay_delivery(client)
+    ticket_id = client.get(f"/api/orders/{oid}").json()["ticket"]["id"]
+
+    assert client.post(f"/api/kitchen/{ticket_id}/start").status_code == 200
+    assert client.post(f"/api/kitchen/{ticket_id}/ready").status_code == 200
+    assert client.post(f"/api/kitchen/{ticket_id}/serve").status_code == 200
+    assert client.get(f"/api/orders/{oid}").json()["order"]["status"] == "served"
+
+    assigned = client.post(f"/api/delivery/{delivery_id}/assign", json={"driver_id": 1})
+    assert assigned.status_code == 200, assigned.text
+    departed = client.post(f"/api/delivery/{delivery_id}/out-for-delivery", json={})
+    assert departed.status_code == 200, departed.text
+    delivered = client.post(f"/api/delivery/{delivery_id}/delivered", json={})
+    assert delivered.status_code == 200, delivered.text
+
+
 def test_delivery_failure_and_cancel_paths_are_guarded(client):
     _, failed_id = _pay_delivery(client)
     assert client.post(f"/api/delivery/{failed_id}/assign", json={"driver_id": 1}).status_code == 200
@@ -205,6 +222,24 @@ def test_delivery_failure_and_cancel_require_reason_and_preserve_state(client):
     assert client.post(f"/api/delivery/{delivery_id}/failed", json={}).status_code == 422
     assert client.post(f"/api/delivery/{delivery_id}/cancel", json={"reason": "   "}).status_code == 422
     assert client.get(f"/api/delivery/{delivery_id}").json() == before
+
+
+@pytest.mark.parametrize(
+    ("action", "event_type"),
+    [("failed", "delivery.failed"), ("cancel", "delivery.cancelled")],
+)
+def test_delivery_reason_is_not_written_to_audit_detail(client, action, event_type):
+    _, delivery_id = _pay_delivery(client)
+    reason = "Leave at 44 Sensitive Road; call 09171234567"
+
+    result = client.post(f"/api/delivery/{delivery_id}/{action}", json={"reason": reason})
+    assert result.status_code == 200, result.text
+
+    events = client.get("/api/audit-events").json()
+    event = next(event for event in events if event["event_type"] == event_type)
+    assert event["path"] == f"/api/delivery/{delivery_id}/{action}"
+    assert event["detail"] == f"delivery_id={delivery_id}"
+    assert reason not in event["detail"]
 
 
 def test_delivery_audit_events_cover_creation_assignment_reassignment_and_callback(client):

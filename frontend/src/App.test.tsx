@@ -116,4 +116,63 @@ describe("counter operational flows", () => {
     expect(container.textContent).toContain("Choose items");
     await act(async () => root.unmount());
   });
+
+  it("clears previous delivery details when starting a new delivery", async () => {
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
+    let createdOrders = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/delivery")) return response([]);
+      if (url.endsWith("/api/delivery/drivers")) return response([]);
+      if (url.endsWith("/api/counter/orders")) {
+        createdOrders += 1;
+        const created = { ...order, id: createdOrders, order_number: `BK-00${createdOrders}`, order_channel: "delivery" };
+        return response({ order: created, lines: [], delivery: null });
+      }
+      if (url.endsWith("/lines")) {
+        const orderId = Number(url.split("/api/orders/")[1].split("/")[0]);
+        const current = { ...order, id: orderId, order_number: `BK-00${orderId}`, order_channel: "delivery", total: 12, lines: [line] };
+        return response({ order: current, lines: [line], delivery: null });
+      }
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const setField = async (selector: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement>(selector)!;
+      await act(async () => {
+        setInputValue?.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+
+    await act(async () => button(container, "Delivery").click());
+    await settle();
+    await act(async () => button(container, "New delivery").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => button(container, "Review order").click());
+    await settle();
+    await setField("#customer-name", "Mika");
+    await setField("#delivery-address", "12 Mabini Street, Cebu City");
+    await setField("#delivery-contact", "09171234567");
+    await setField("#delivery-contact-name", "Mika");
+
+    await act(async () => button(container, "Back to order type").click());
+    await act(async () => button(container, "Delivery").click());
+    await settle();
+    await act(async () => button(container, "New delivery").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => button(container, "Review order").click());
+    await settle();
+
+    expect(container.querySelector<HTMLInputElement>("#customer-name")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-address")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-contact")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-contact-name")!.value).toBe("");
+    await act(async () => root.unmount());
+  });
 });
