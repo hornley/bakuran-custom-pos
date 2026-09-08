@@ -207,6 +207,77 @@ def test_purchase_line_rejects_non_finite_cost_before_mutation(client):
         assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
 
 
+def test_purchase_line_rejects_finite_overflow_before_mutation(client):
+    purchase = client.post("/api/purchases", json={"supplier_id": 1})
+    assert purchase.status_code == 200
+    pid = purchase.json()["id"]
+    with db.connect() as connection:
+        before = {
+            "lines": connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0],
+            "total": connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        f"/api/purchases/{pid}/lines",
+        content=(
+            b'{"product_id":1,"warehouse_id":1,"quantity":2,'
+            b'"unit_cost":1e308,"idempotency_key":"overflow-cost"}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert rejected.status_code == 422
+    assert "line total" in rejected.json()["detail"]
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0] == before["lines"]
+        assert connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0] == before["total"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+        assert connection.execute("SELECT 1 FROM idempotency_keys WHERE key='overflow-cost'").fetchone() is None
+
+
+def test_purchase_total_rejects_finite_sum_overflow_before_mutation(client):
+    purchase = client.post("/api/purchases", json={"supplier_id": 1})
+    assert purchase.status_code == 200
+    pid = purchase.json()["id"]
+    first = client.post(
+        f"/api/purchases/{pid}/lines",
+        content=(
+            b'{"product_id":1,"warehouse_id":1,"quantity":1,'
+            b'"unit_cost":1e308,"idempotency_key":"large-cost-1"}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert first.status_code == 200
+    with db.connect() as connection:
+        before = {
+            "lines": connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0],
+            "total": connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        f"/api/purchases/{pid}/lines",
+        content=(
+            b'{"product_id":2,"warehouse_id":1,"quantity":1,'
+            b'"unit_cost":1e308,"idempotency_key":"large-cost-2"}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert rejected.status_code == 422
+    assert "total" in rejected.json()["detail"]
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0] == before["lines"]
+        assert connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0] == before["total"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+        assert connection.execute("SELECT 1 FROM idempotency_keys WHERE key='large-cost-2'").fetchone() is None
+
+
 def test_purchase_line_accepts_zero_and_decimal_costs_with_idempotent_replay(client):
     purchase = client.post("/api/purchases", json={"supplier_id": 1})
     assert purchase.status_code == 200

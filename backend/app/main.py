@@ -541,6 +541,30 @@ class PurchaseLifecycleIn(BaseModel):
         return value
 
 
+def _purchase_line_total(quantity, unit_cost):
+    try:
+        if not math.isfinite(unit_cost):
+            fail("Purchase unit cost must be finite", 422)
+        line_total = quantity * unit_cost
+    except (OverflowError, TypeError, ValueError):
+        fail("Purchase line total exceeds the supported numeric range", 422)
+    if not math.isfinite(line_total):
+        fail("Purchase line total exceeds the supported numeric range", 422)
+    return line_total
+
+
+def _purchase_total(line_totals):
+    if any(not math.isfinite(line_total) for line_total in line_totals):
+        fail("Purchase total exceeds the supported numeric range", 422)
+    try:
+        total = math.fsum(line_totals)
+    except OverflowError:
+        fail("Purchase total exceeds the supported numeric range", 422)
+    if not math.isfinite(total):
+        fail("Purchase total exceeds the supported numeric range", 422)
+    return total
+
+
 def _active_product(c, product_id):
     row = c.execute("SELECT id FROM menu_items WHERE id=? AND active=1", (product_id,)).fetchone()
     if not row:
@@ -1054,11 +1078,19 @@ def purchase_line(pid: int, x: PurchaseLineIn, request: Request):
         if purchase["status"] != "draft": fail("Only draft purchases can be edited", 409)
         _active_product(c, x.product_id)
         _active_warehouse(c, x.warehouse_id)
+        line_total = _purchase_line_total(x.quantity, x.unit_cost)
+        existing_line_totals = [
+            _purchase_line_total(line["quantity"], line["unit_cost"])
+            for line in c.execute(
+                "SELECT quantity,unit_cost FROM purchase_lines WHERE purchase_id=?",
+                (pid,),
+            ).fetchall()
+        ]
+        total = _purchase_total([*existing_line_totals, line_total])
         c.execute(
             "INSERT INTO purchase_lines(purchase_id,product_id,warehouse_id,quantity,unit_cost) VALUES(?,?,?,?,?)",
             (pid, x.product_id, x.warehouse_id, x.quantity, x.unit_cost),
         )
-        total = c.execute("SELECT COALESCE(SUM(quantity*unit_cost),0) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0]
         c.execute("UPDATE purchases SET total=? WHERE id=?", (total, pid))
         _audit(c, request, "purchasing.line_added", f"purchase={pid};product={x.product_id};warehouse={x.warehouse_id}")
         result = purchase_view(c, pid)
