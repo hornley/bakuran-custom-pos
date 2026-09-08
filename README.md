@@ -14,6 +14,8 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`AGENTS.md`](AGENTS.md): database safety, phase lifecycle, branching, commits, and approval rules.
 - [`TESTING.md`](TESTING.md): short verification instructions for the current changes.
 - [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
+- [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
+- [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
 - [`docs/phases/phase-4-inventory-purchasing.md`](docs/phases/phase-4-inventory-purchasing.md): inventory/purchasing vertical slice, checks, and approval gate.
 
 ## Run the project
