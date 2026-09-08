@@ -98,6 +98,7 @@ def test_delivery_confirmation_and_assignment_require_payment_and_metadata(clien
 
     before = client.get(f"/api/delivery/{delivery_id}").json()
     assert before["delivery"]["status"] == "pending"
+    assert client.get("/api/delivery").json() == []
     not_paid = client.post(f"/api/delivery/{delivery_id}/assign", json={"driver_id": 1})
     assert not_paid.status_code == 409
     assert client.get(f"/api/delivery/{delivery_id}").json() == before

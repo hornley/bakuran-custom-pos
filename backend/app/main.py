@@ -381,11 +381,27 @@ def delivery_board(status: str | None = Query(default=None)):
         fail("Unknown delivery status", 422)
     with connect() as c:
         if status is None:
-            delivery_ids = rows(c, "SELECT id FROM delivery_orders ORDER BY updated_at DESC, id DESC")
+            delivery_ids = rows(
+                c,
+                """
+                SELECT d.id
+                FROM delivery_orders d
+                JOIN restaurant_orders o ON o.id = d.order_id
+                WHERE EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'paid')
+                ORDER BY d.updated_at DESC, d.id DESC
+                """,
+            )
         else:
             delivery_ids = rows(
                 c,
-                "SELECT id FROM delivery_orders WHERE status = ? ORDER BY updated_at DESC, id DESC",
+                """
+                SELECT d.id
+                FROM delivery_orders d
+                JOIN restaurant_orders o ON o.id = d.order_id
+                WHERE d.status = ?
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'paid')
+                ORDER BY d.updated_at DESC, d.id DESC
+                """,
                 (status,),
             )
         return [_delivery_record(c, value["id"]) for value in delivery_ids]
