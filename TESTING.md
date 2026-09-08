@@ -6,7 +6,23 @@ Run the current checks from the repository root:
 ./test.sh
 ```
 
-`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend Vitest suite and production build. No virtual-environment activation or directory change is required.
+`test.sh` runs backend pytest, the frontend Vitest suite, and the frontend production build. No virtual-environment activation or directory change is required.
+
+The focused checks can be run directly:
+
+```bash
+(cd backend && .venv/bin/python -m pytest -q tests/test_auth_boundary.py tests/test_qr_ordering.py tests/test_delivery.py)
+(cd frontend && npm test)
+(cd frontend && npm run build)
+```
+
+The backend pytest fixtures create temporary SQLite databases for each test. The shared fixture sets `AUTH_LOCAL_DEV_BYPASS=true` to model an explicitly trusted local development instance; boundary tests unset it to verify the shipped default denial and separately cover local session/role/CSRF behavior. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
+
+The frontend also has a focused Vitest check for the secondary delivery board:
+
+```bash
+cd frontend && npm test
+```
 
 For the phase-4 vertical slice, run the focused backend suite and frontend tests directly:
 
@@ -54,23 +70,23 @@ cd frontend
 npm test
 ```
 
-The suite uses mocked API responses and covers ready-queue selection, successful payment progression, recoverable order-line errors, Operations loading boundaries, and selected partial/over-receipt payloads. It does not replace a live browser/E2E check.
+The suite uses mocked API responses and covers ready-queue selection, successful payment progression, recoverable order-line errors, Operations loading boundaries, selected partial/over-receipt payloads, the public QR route, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, recoverable customer API errors, delivery-board rendering, delivery metadata reset, and delivery mutation headers. It does not replace a live browser/E2E check.
+
+## Customer QR ordering checks
+
+The QR backend tests cover session-scoped hashed tokens, invalid and closed tokens, cross-session isolation, active-menu filtering, bounded names and baskets, server-side price revalidation, one active QR order per session, transaction rollback, concurrent idempotent retries, payload conflicts, CORS preflight, and operator-auth boundaries.
+
+## Inventory and purchasing checks
+
+The focused inventory backend tests cover warehouse/product validation, low-stock and reorder levels, reasoned signed adjustments, partial and over-receipts, per-line completion, multi-line rollback, durable idempotency and concurrent retries, optional-auth role denial/authorization, database constraints, and audit records. The frontend tests confirm that Operations remains secondary, inventory/purchasing/audit endpoints are wired, and responsive safety-critical controls remain present.
+
+## Delivery checks
+
+The focused delivery suite covers delivery-channel creation, address/contact/contact-name validation, metadata isolation, payment and cash-only gates, invalid transition rollback, active-driver assignment and reassignment history, duplicate callbacks and idempotency-key conflicts, failed/cancelled outcomes, optional-auth viewer denial with audit evidence, and delivery audit records. The board is a local operational view; this phase intentionally has no external courier, webhook, driver app, GPS, or route-optimization integration.
 
 ## Current validation baseline
 
-- Focused inventory/purchasing backend: `32 passed` with 2 existing dependency deprecation warnings (`cd backend && .venv/bin/python -m pytest -q tests/test_inventory_purchasing.py`).
-- Full backend suite: `50 passed` with 3 existing warnings (`cd backend && .venv/bin/python -m pytest -q`).
-- Frontend Vitest suite: `6 passed` (`cd frontend && npm test`).
-- Frontend production build and TypeScript check: passed (`cd frontend && npm run build`).
-- Root `./test.sh`: passed; it reruns the full backend suite, frontend tests, and build.
-- `git diff --check`: passed.
-- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
-- Ready/pickup regression: ready and served tickets remain visible until order close
-- Frontend tests include the Phase 3 POS flow checks and Phase 4 Operations boundary/safety controls.
-- Database: isolated temporary test databases; no test mutation targets `backend/data/app.db`.
-- No live browser/E2E check was run; frontend tests use mocked fetch responses.
-- Phase status: Phase 4 implemented; explicit developer approval is required before merge.
-
-The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, and invalid kitchen transition conflicts without mutation.
-
-Inventory and purchasing are single-store in this phase. Warehouse IDs scope records within the store; multi-location synchronization, transfers, and cross-store reporting are not implemented.
+- Run `./test.sh` for the current integrated backend count, frontend tests, and production build.
+- Run `git diff --check`.
+- Backend tests use isolated temporary SQLite databases; never point tests at `backend/data/app.db`.
+- No live browser/E2E or external courier integration is exercised by these tests; frontend tests use mocked fetch responses.

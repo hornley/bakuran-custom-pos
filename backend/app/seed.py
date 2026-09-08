@@ -20,8 +20,18 @@ def seed(c):
             "INSERT OR IGNORE INTO inventory(id,product_id,warehouse_id,on_hand,reserved,updated_at,reorder_level) VALUES (?,?,?,?,?,?,?)",
             (item_id, item_id, 1, qty, 0, SEED_TIMESTAMP, 5),
         )
+    c.executemany(
+        """
+        INSERT OR IGNORE INTO delivery_drivers(id, code, name, contact, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "DRV-001", "Ari Santos", "09171234567", 1, SEED_TIMESTAMP),
+            (2, "DRV-002", "Ben Cruz", "09179876543", 1, SEED_TIMESTAMP),
+        ],
+    )
     if not c.execute("SELECT 1 FROM table_sessions WHERE id=1").fetchone():
-        c.execute("INSERT INTO table_sessions VALUES (1,'SES-0001',1,'closed',?,?)",(SEED_TIMESTAMP,SEED_TIMESTAMP))
+        c.execute("INSERT INTO table_sessions(id,session_number,table_id,status,opened_at,closed_at) VALUES (1,'SES-0001',1,'closed',?,?)",(SEED_TIMESTAMP,SEED_TIMESTAMP))
         c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel) VALUES (1,'ORD-0001',1,'closed',23,23,?,?,?,?,?,'Walk-in Customer','table')",(SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP))
         c.execute("INSERT INTO restaurant_order_lines VALUES (1,1,3,'Lemonade',1,5,5)")
         c.execute("INSERT INTO restaurant_order_lines VALUES (2,1,1,'House Burger',1,18,18)")
