@@ -149,7 +149,7 @@ def order_tax_snapshot(connection: sqlite3.Connection, order: sqlite3.Row, snaps
     # must not acquire a rule merely because one is configured later.
     if order["tax_policy"] == "none" and order["status"] != "open":
         return tax_snapshot(connection, order["subtotal"], None, snapshot_at)
-    rule = effective_rule(connection)
+    rule = effective_rule(connection, snapshot_at[:10])
     return tax_snapshot(connection, order["subtotal"], rule, snapshot_at)
 
 

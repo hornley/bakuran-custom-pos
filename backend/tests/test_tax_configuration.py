@@ -265,11 +265,13 @@ def test_payment_amount_with_more_than_two_decimal_places_is_rejected_without_mu
     assert loaded["payment"] is None
 
 
-def test_payment_float_payload_is_rejected_to_keep_money_decimal_only(client):
+def test_payment_float_payload_keeps_existing_api_contract_with_decimal_validation(client):
+    assert configure(client).status_code == 201
     order_id = start_order(client)
     assert confirm(client, order_id).status_code == 200
-    response = client.post(f"/api/orders/{order_id}/pay", json={"amount": 18.0, "method": "cash"})
-    assert response.status_code == 422
+    response = client.post(f"/api/orders/{order_id}/pay", json={"amount": 19.8, "method": "cash"})
+    assert response.status_code == 200
+    assert Decimal(str(response.json()["payment"]["amount"])) == Decimal("19.80")
 
 
 def test_legacy_paid_order_without_tax_snapshot_keeps_zero_tax_when_rule_is_added_later(client):

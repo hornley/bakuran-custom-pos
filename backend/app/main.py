@@ -46,13 +46,6 @@ class PaymentIn(BaseModel):
             raise ValueError("amount must have at most two decimal places")
         return value
 
-    @field_validator("amount", mode="before")
-    @classmethod
-    def amount_decimal_text(cls, value):
-        if isinstance(value, float):
-            raise ValueError("amount must be supplied as a decimal string")
-        return value
-
     @field_validator("method")
     @classmethod
     def method_valid(cls, value):
