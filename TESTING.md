@@ -6,7 +6,7 @@ Run the current checks from the repository root:
 ./test.sh
 ```
 
-`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend production build. No virtual-environment activation or directory change is required.
+`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend Vitest suite and production build. No virtual-environment activation or directory change is required.
 
 The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
 
@@ -50,8 +50,9 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 - Backend tests: `17 passed` including Phase 3 lifecycle regressions
 - Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
 - Ready/pickup regression: ready and served tickets remain visible until order close
-- Frontend build: `npm run build`
+- Frontend tests: `3 passed` in 1 Vitest file
+- Frontend build: passed with TypeScript and Vite
 - Database: isolated temporary test databases
-- Phase status: Phase 3 implementation in progress; developer approval is required before merge
+- Phase status: Phase 3 implementation complete; developer approval is required before merge
 
 The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, and invalid kitchen transition conflicts without mutation.
