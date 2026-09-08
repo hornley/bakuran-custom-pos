@@ -177,6 +177,69 @@ def test_purchase_creation_and_line_idempotency_are_durable(client):
     assert conflict.status_code == 409
 
 
+def test_purchase_line_rejects_non_finite_cost_before_mutation(client):
+    purchase = client.post("/api/purchases", json={"supplier_id": 1})
+    assert purchase.status_code == 200
+    pid = purchase.json()["id"]
+    with db.connect() as connection:
+        before = {
+            "lines": connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0],
+            "total": connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        f"/api/purchases/{pid}/lines",
+        content=(
+            b'{"product_id":1,"warehouse_id":1,"quantity":1,'
+            b'"unit_cost":1e309,"idempotency_key":"non-finite-cost"}'
+        ),
+        headers={"content-type": "application/json"},
+    )
+    assert rejected.status_code == 422
+    assert any(error["loc"][-1] == "unit_cost" for error in rejected.json()["detail"])
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0] == before["lines"]
+        assert connection.execute("SELECT total FROM purchases WHERE id=?", (pid,)).fetchone()[0] == before["total"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+
+
+def test_purchase_line_accepts_zero_and_decimal_costs_with_idempotent_replay(client):
+    purchase = client.post("/api/purchases", json={"supplier_id": 1})
+    assert purchase.status_code == 200
+    pid = purchase.json()["id"]
+
+    zero_payload = {
+        "product_id": 1,
+        "warehouse_id": 1,
+        "quantity": 2,
+        "unit_cost": 0,
+        "idempotency_key": "zero-cost",
+    }
+    first_zero = client.post(f"/api/purchases/{pid}/lines", json=zero_payload)
+    second_zero = client.post(f"/api/purchases/{pid}/lines", json=zero_payload)
+    assert first_zero.status_code == second_zero.status_code == 200
+    assert first_zero.json() == second_zero.json()
+    assert first_zero.json()["lines"][0]["unit_cost"] == 0
+
+    decimal_payload = {
+        "product_id": 2,
+        "warehouse_id": 1,
+        "quantity": 2,
+        "unit_cost": 1.25,
+        "idempotency_key": "decimal-cost",
+    }
+    first_decimal = client.post(f"/api/purchases/{pid}/lines", json=decimal_payload)
+    second_decimal = client.post(f"/api/purchases/{pid}/lines", json=decimal_payload)
+    assert first_decimal.status_code == second_decimal.status_code == 200
+    assert first_decimal.json() == second_decimal.json()
+    assert first_decimal.json()["purchase"]["total"] == 2.5
+    assert len(first_decimal.json()["lines"]) == 2
+
+
 def test_purchase_order_and_close_idempotency_are_durable(client):
     pid = create_purchase(client, quantity=2)
     order_payload = {"idempotency_key": "order-once"}

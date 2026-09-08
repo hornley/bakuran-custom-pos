@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import sqlite3
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -373,8 +374,17 @@ class PurchaseLineIn(BaseModel):
     product_id: int = Field(default=1, gt=0)
     warehouse_id: int = Field(default=1, gt=0)
     quantity: int = Field(gt=0)
-    unit_cost: float = Field(ge=0)
+    unit_cost: float = Field(ge=0, allow_inf_nan=False)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("unit_cost", mode="before")
+    @classmethod
+    def unit_cost_valid(cls, value):
+        try:
+            finite_value = math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return value
+        return value if finite_value else "non-finite unit_cost"
 
     @field_validator("idempotency_key", mode="before")
     @classmethod
