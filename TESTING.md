@@ -57,7 +57,7 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 - Focused delivery pytest: `11 passed`
 - Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
 - Ready/pickup regression: ready and served tickets remain visible until order close
-- Frontend tests: `5 passed` in 2 Vitest files
+- Frontend tests: `6 passed` in 2 Vitest files
 - Frontend build: passed with TypeScript and Vite
 - Database: isolated temporary test databases
 - Phase 3 baseline status: implementation complete; developer approval is required before merge
@@ -78,7 +78,7 @@ The suite covers delivery-channel creation, address/contact/contact-name validat
 Phase 5 validation observed on 2026-09-08:
 
 - Focused delivery pytest: `11 passed`.
-- Full `./test.sh`: `28 passed` backend, `5 passed` frontend tests in 2 files, and production build passed.
+- Full `./test.sh`: `28 passed` backend, `6 passed` frontend tests in 2 files, and production build passed.
 - `git diff --check`: passed.
 - Known output is limited to the existing Starlette/httpx, anyio, and `app.seed` deprecation/runtime warnings.
 - No live browser/E2E or external courier integration was exercised; the board contract and delivery mutation header merge are covered by Vitest and the application bundle by the production build.

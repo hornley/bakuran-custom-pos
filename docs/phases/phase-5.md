@@ -40,7 +40,7 @@ git diff --check
 
 The focused tests cover missing/invalid metadata, no-mutation conflicts, order isolation, assignment/reassignment, duplicate callbacks, idempotency-key conflicts, failure/cancellation, payment and cash-only gates, audit events, and viewer denial under optional auth. Frontend tests render the delivery board contract; the production build verifies TypeScript and Vite integration.
 
-Observed validation on 2026-09-08: focused delivery pytest `11 passed`; full `./test.sh` `28 passed` backend, `5 passed` frontend tests in 2 files, and a successful production build; `git diff --check` passed. The run emitted only the existing Starlette/httpx, anyio, and `app.seed` warnings. No live browser/E2E or external courier service was exercised. The delivery mutation header-merge regression is covered by the focused frontend test.
+Observed validation on 2026-09-08: focused delivery pytest `11 passed`; full `./test.sh` `28 passed` backend, `6 passed` frontend tests in 2 files, and a successful production build; `git diff --check` passed. The run emitted only the existing Starlette/httpx, anyio, and `app.seed` warnings. No live browser/E2E or external courier service was exercised. The delivery mutation header-merge regression is covered by the focused frontend test.
 
 ## Approval gate
 
