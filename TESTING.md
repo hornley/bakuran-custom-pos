@@ -6,7 +6,15 @@ Run the current checks from the repository root:
 ./test.sh
 ```
 
-`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend Vitest suite and production build. No virtual-environment activation or directory change is required.
+`test.sh` runs backend pytest, the frontend Vitest suite, and the frontend production build. No virtual-environment activation or directory change is required.
+
+The focused checks can be run directly:
+
+```bash
+backend/.venv/bin/python -m pytest -q backend/tests/test_qr_ordering.py
+cd frontend && npm test
+cd frontend && npm run build
+```
 
 The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
 
@@ -43,16 +51,18 @@ cd frontend
 npm test
 ```
 
-The suite uses mocked API responses and covers ready-queue selection, successful payment progression, and recoverable order-line errors. It does not replace a live browser/E2E check.
+The suite uses mocked API responses and covers ready-queue selection, successful payment progression, recoverable order-line errors, the public QR route, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, and recoverable customer API errors. It does not replace a live browser/E2E check.
 
-## Current validation baseline
+## Customer QR ordering checks
 
-- Backend tests: `17 passed` including Phase 3 lifecycle regressions
+The QR backend tests cover session-scoped hashed tokens, invalid and closed tokens, cross-session isolation, active-menu filtering, bounded names and baskets, server-side price revalidation, one active QR order per session, transaction rollback, concurrent idempotent retries, payload conflicts, CORS preflight, and operator-auth boundaries.
+
+The frontend tests cover the public route parser, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, and recoverable API errors. The browser flow should be checked against an isolated temporary database; do not open a table or submit an order against `backend/data/app.db`.
+
+## Current phase handoff
+
+- Backend tests: run `./test.sh` for the current count
 - Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
-- Ready/pickup regression: ready and served tickets remain visible until order close
-- Frontend tests: `3 passed` in 1 Vitest file
-- Frontend build: passed with TypeScript and Vite
+- Frontend tests and build: run `./test.sh`
 - Database: isolated temporary test databases
-- Phase status: Phase 3 implementation complete; developer approval is required before merge
-
-The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, and invalid kitchen transition conflicts without mutation.
+- Feature status: awaiting developer approval

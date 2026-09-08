@@ -1,6 +1,6 @@
 # Bakuran POS System Draft#1
 
-Local restaurant POS for counter pickup, guided cash payment, kitchen flow, and optional table operations. QR table ordering is represented in the order contract for a future customer-facing route.
+Local restaurant POS for counter pickup, guided cash payment, customer-facing table QR ordering, kitchen flow, and optional table operations. QR orders are submitted publicly from an open table session and then paid in cash by front-desk staff.
 
 This is the generated Bakuran POS project. The commands below are project-local and intentionally use only these fixed ports:
 
@@ -16,6 +16,7 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
 - [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
 - [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
+- [`docs/features/customer-qr-ordering.md`](docs/features/customer-qr-ordering.md): current customer QR vertical slice, contract, checks, and limitations.
 
 ## Run the project
 
@@ -62,7 +63,8 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 
 - Counter pickup: build an order, confirm the customer's name, issue an order number, record cash payment, move the paid order to kitchen, call the customer, and issue a receipt.
 - Payment gate: orders remain in `awaiting_payment` and out of the kitchen queue until cash payment is recorded.
-- Table service: view floor/table status and guarded open/close transitions. Table orders can carry `customer_name` and `order_channel=qr` for the future QR route.
+- Table service: view floor/table status and guarded open/close transitions. Table sessions issue QR tokens for the customer ordering route.
+- Customer QR ordering: open-table tokens scope a public menu and one awaiting-payment QR order to the current table session.
 - Kitchen queue: move tickets through `queued -> preparing -> ready -> served`.
 - Attendance: review employee attendance status.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
@@ -99,13 +101,21 @@ GET /api/attendance
 GET /api/settings
 GET /api/notifications
 GET /api/search
+GET /api/customer/tables/{token}
+GET /api/customer/tables/{token}/menu
+POST /api/customer/tables/{token}/orders
+GET /api/customer/tables/{token}/orders/{order_id}
 ```
 
 Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. Inventory and purchasing endpoints remain available as deferred back-office APIs, but the POS frontend does not load or use them. The frontend uses `/api/receipts` for sales receipts.
 
+Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order; only the authenticated front desk can record cash and release that order to kitchen.
+
 ## Authentication
 
 The current manifest uses `auth_profile: disabled`, so the desk opens directly. The generated backend retains the local authentication and CSRF modules for an opt-in local-auth variant. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
+
+Customer QR endpoints are intentionally public bearer-token routes. They do not grant access to operator endpoints, and the customer frontend omits operator cookies. QR tokens are session-scoped and stored only as hashes.
 
 ## Troubleshooting
 
@@ -119,4 +129,4 @@ If another application owns either port, stop that application before running `.
 
 ## Boundaries
 
-This is a local SQLite operational slice. It does not include multi-location synchronization, reservations, delivery, online ordering, external payment gateways, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, webhooks, background workers, hosted deployment, or third-party identity providers.
+This is a local single-store SQLite operational slice. It does not include multi-location synchronization, reservations, delivery, external payment gateways, online card payment, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, webhooks, background workers, hosted deployment, or third-party identity providers.
