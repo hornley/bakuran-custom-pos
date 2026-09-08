@@ -175,6 +175,41 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
 .queue-side > strong { color: var(--amber); font-size: 16px; }
 .operations-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .operations-grid h3 { margin: 10px 0; }
+.operations-stack { display: grid; gap: 18px; }
+.operations-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding-bottom: 17px; }
+.field-inline { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .1em; }
+.field-inline .text-input { min-width: 220px; margin: 0; }
+.operations-summary { display: flex; align-items: center; gap: 15px; color: var(--muted); font-size: 11px; }
+.operations-summary strong { color: var(--amber); font-weight: 600; }
+.operations-panel h3 { margin-bottom: 0; }
+.form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, .45fr); gap: 12px; }
+.form-grid .field-label { margin-top: 20px; }
+.operations-panel > .action-button { margin-top: 18px; }
+.inventory-table { margin-top: 17px; border-top: 1px solid var(--line); }
+.inventory-row { gap: 15px; }
+.inline-control { display: flex; align-items: center; gap: 8px; }
+.compact-input { width: 68px; color: var(--cream); background: var(--panel-2); border: 1px solid var(--line); padding: 8px 6px; font-size: 11px; text-align: center; }
+.compact-select { min-width: 150px; }
+.purchase-panel { overflow: hidden; }
+.purchase-panel .panel-heading { align-items: end; }
+.purchase-panel .panel-intro { margin: 7px 0 0; }
+.purchase-list { display: grid; gap: 12px; margin-top: 18px; }
+.purchase-card { border: 1px solid var(--line-soft); background: var(--panel-2); padding: 17px; }
+.purchase-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 15px; padding-bottom: 13px; border-bottom: 1px solid var(--line-soft); }
+.purchase-heading h3 { margin-bottom: 3px; }
+.purchase-heading small { color: var(--muted); font-size: 10px; }
+.purchase-lines { display: grid; }
+.purchase-line { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.purchase-line strong { font-size: 12px; font-weight: 550; }
+.purchase-line small { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.purchase-form { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(95px, .65fr) minmax(75px, .45fr) minmax(85px, .55fr) auto; gap: 7px; padding: 15px 0 0; }
+.purchase-form .text-input { min-width: 0; }
+.purchase-card > .action-button { margin-top: 14px; }
+.receipt-form { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding-top: 15px; }
+.receipt-form .text-input { flex: 1 1 220px; min-width: 180px; }
+.check-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; }
+.check-label input { accent-color: var(--amber); }
+.audit-panel .simple-row small:last-child { text-align: right; }
 .simple-row { grid-template-columns: minmax(0, 1fr) auto; }
 .footer { display: flex; justify-content: space-between; gap: 15px; border-top: 1px solid var(--line); color: var(--faint); font-size: 10px; padding: 17px 5vw; }
 
@@ -183,6 +218,8 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
   .entry-grid { grid-template-columns: 1fr; }
   .basket-panel { position: static; }
   .handoff-action { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; }
+  .purchase-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .purchase-form .action-button { grid-column: span 2; }
 }
 @media (max-width: 640px) {
   .topbar { padding: 0 20px; }
@@ -201,6 +238,17 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
   .menu-controls { justify-content: space-between; }
   .queue-card { align-items: flex-start; flex-direction: column; }
   .queue-side { width: 100%; justify-content: space-between; }
+  .operations-toolbar, .purchase-panel .panel-heading { align-items: stretch; flex-direction: column; }
+  .field-inline { align-items: flex-start; flex-direction: column; }
+  .field-inline .text-input { width: 100%; min-width: 0; }
+  .operations-summary { justify-content: space-between; }
+  .form-grid, .purchase-form { grid-template-columns: 1fr; }
+  .purchase-form .action-button { grid-column: auto; }
+  .purchase-line { align-items: flex-start; }
+  .receipt-form { align-items: stretch; flex-direction: column; }
+  .receipt-form .action-button, .receipt-form .text-input { width: 100%; }
+  .audit-panel .simple-row { align-items: flex-start; }
+  .audit-panel .simple-row small:last-child { text-align: left; }
   .fulfillment-status { grid-template-columns: 1fr; }
   .fulfillment-status > div { border-right: 0; border-bottom: 1px solid var(--line-soft); padding: 12px 0; margin: 0; }
   .fulfillment-status > div:last-child { border-bottom: 0; }

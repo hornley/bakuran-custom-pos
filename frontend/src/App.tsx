@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import "./styles.css";
 import { csrfHeaders } from "./auth";
 
@@ -28,6 +28,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
 
 const money = (value: any) => `$${Number(value || 0).toFixed(2)}`;
 const label = (value: any) => String(value ?? "").replaceAll("_", " ");
+const operationKey = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
@@ -66,13 +67,14 @@ export default function App() {
   const [view, setView] = useState<View>("order");
   const [customerName, setCustomerName] = useState("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [secondaryLoading, setSecondaryLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [secondary, setSecondary] = useState<Record<string, Row[]>>({});
   const [search, setSearch] = useState("");
+  const [operationsWarehouse, setOperationsWarehouse] = useState(1);
 
   const categories = useMemo(
     () => Array.from(new Set(menu.map((item) => String(item.category_name || item.category || "Menu")))),
@@ -100,7 +102,9 @@ export default function App() {
       setError("");
       setMenu(await api<Row[]>("/api/menu"));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not reach the Bakuran API.");
+      const errorMessage = reason instanceof Error ? reason.message : "Could not reach the Bakuran API.";
+      setError(errorMessage);
+      throw reason;
     } finally {
       setLoading(false);
     }
@@ -125,6 +129,7 @@ export default function App() {
       setBusy("start");
       setError("");
       setNotice("");
+      if (!menu.length) await loadMenu();
       await ensureOrder();
       setCompletedReceipt(null);
       setShowEntryChoice(false);
@@ -250,27 +255,130 @@ export default function App() {
     setNotice("");
   }
 
-  async function loadSecondary(target: View) {
+  async function loadSecondary(target: View, warehouseId = operationsWarehouse) {
     if (target === "order") return;
     try {
       setSecondaryLoading(true);
       const path = target === "payments"
         ? `/api/payment-queue${search ? `?q=${encodeURIComponent(search)}` : ""}`
-        : target === "operations"
-          ? "/api/tables"
-          : target === "ready"
+        : target === "ready"
             ? "/api/kitchen?queue=ready"
             : "/api/kitchen";
-      const values = await api<Row[]>(path);
-      setSecondary((current) => ({ ...current, [target]: values }));
       if (target === "operations") {
-        const receipts = await api<Row[]>("/api/receipts");
-        setSecondary((current) => ({ ...current, receipts }));
+        const [tables, receipts, inventoryPayload, warehouseRows, purchaseRows, catalogRows, supplierRows, auditRows] = await Promise.all([
+          api<Row[]>("/api/tables"),
+          api<Row[]>("/api/receipts"),
+          api<Row>(`/api/inventory?warehouse_id=${warehouseId}`),
+          api<Row[]>("/api/warehouses"),
+          api<Row[]>("/api/purchases"),
+          api<Row[]>("/api/catalog"),
+          api<Row[]>("/api/suppliers"),
+          api<Row[]>("/api/audit-events"),
+        ]);
+        setSecondary((current) => ({
+          ...current,
+          operations: tables,
+          receipts,
+          inventory: inventoryPayload.products || [],
+          movements: inventoryPayload.movements || [],
+          warehouses: warehouseRows,
+          purchases: purchaseRows,
+          catalog: catalogRows.filter((item) => item.active !== 0),
+          suppliers: supplierRows.filter((supplier) => supplier.active !== 0),
+          audit: auditRows,
+        }));
+      } else {
+        const values = await api<Row[]>(path);
+        setSecondary((current) => ({ ...current, [target]: values }));
       }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not load this operational view.");
     } finally {
       setSecondaryLoading(false);
+    }
+  }
+
+  async function inventoryAdjustment(values: Row) {
+    try {
+      setBusy("inventory-adjustment");
+      setError("");
+      await api("/api/stock/adjustment", { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("adjustment") }) });
+      setNotice("Stock adjustment saved.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the stock adjustment.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function updateReorderLevel(values: Row) {
+    try {
+      setBusy(`reorder-${values.product_id}`);
+      setError("");
+      await api("/api/inventory/reorder-level", { method: "PUT", body: JSON.stringify({ ...values, idempotency_key: operationKey("reorder") }) });
+      setNotice("Reorder level saved.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the reorder level.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function createPurchase(supplierId: number) {
+    try {
+      setBusy("purchase-create");
+      setError("");
+      await api("/api/purchases", { method: "POST", body: JSON.stringify({ supplier_id: supplierId, idempotency_key: operationKey("purchase") }) });
+      setNotice("Draft purchase created.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not create the purchase.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function addPurchaseLine(purchaseId: number, values: Row) {
+    try {
+      setBusy(`purchase-line-${purchaseId}`);
+      setError("");
+      await api(`/api/purchases/${purchaseId}/lines`, { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("purchase-line") }) });
+      setNotice("Purchase line added.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add the purchase line.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function changePurchaseStatus(purchaseId: number, action: "order" | "close") {
+    try {
+      setBusy(`purchase-${action}-${purchaseId}`);
+      setError("");
+      await api(`/api/purchases/${purchaseId}/${action}`, { method: "POST", body: JSON.stringify({}) });
+      setNotice(action === "order" ? "Purchase ordered." : "Purchase closed.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update the purchase.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function receivePurchase(purchaseId: number, values: Row) {
+    try {
+      setBusy(`purchase-receive-${purchaseId}`);
+      setError("");
+      await api(`/api/purchases/${purchaseId}/receive`, { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("receipt") }) });
+      setNotice("Receipt saved and inventory updated.");
+      await loadSecondary("operations");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not receive this purchase.");
+    } finally {
+      setBusy("");
     }
   }
 
@@ -293,8 +401,6 @@ export default function App() {
     }
   }
 
-  useEffect(() => { void loadMenu(); }, []);
-
   const hasItems = currentLines.length > 0;
   const currentStepIndex = steps.findIndex(([key]) => key === step);
   const kitchenRows = secondary.kitchen || [];
@@ -302,6 +408,12 @@ export default function App() {
   const paymentRows = (secondary.payments || []).filter((row) => row.order_channel === "qr");
   const tableRows = (secondary.operations || []).filter((row) => row.code !== "COUNTER");
   const receipts = secondary.receipts || [];
+  const inventoryRows = secondary.inventory || [];
+  const warehouses = secondary.warehouses || [];
+  const purchases = secondary.purchases || [];
+  const catalog = secondary.catalog || [];
+  const suppliers = secondary.suppliers || [];
+  const auditEvents = secondary.audit || [];
 
   return (
     <div className="shell">
@@ -499,6 +611,21 @@ export default function App() {
             kitchenRows={view === "ready" ? readyRows : kitchenRows}
             tableRows={tableRows}
             receipts={receipts}
+            inventoryRows={inventoryRows}
+            warehouses={warehouses}
+            purchases={purchases}
+            catalog={catalog}
+            suppliers={suppliers}
+            auditEvents={auditEvents}
+            operationsWarehouse={operationsWarehouse}
+            onWarehouseChange={(warehouseId) => { setOperationsWarehouse(warehouseId); void loadSecondary("operations", warehouseId); }}
+            onAdjust={inventoryAdjustment}
+            onReorderLevel={updateReorderLevel}
+            onCreatePurchase={createPurchase}
+            onAddPurchaseLine={addPurchaseLine}
+            onChangePurchaseStatus={changePurchaseStatus}
+            onReceivePurchase={receivePurchase}
+            busy={busy}
             search={search}
             setSearch={setSearch}
             onSearch={() => void loadSecondary("payments")}
@@ -534,7 +661,70 @@ function EntryChoice({ onManual, onQr, busy }: { onManual: () => void; onQr: () 
   );
 }
 
-function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, receipts, search, setSearch, onSearch, onRefresh, onSelect }: { view: View; loading: boolean; paymentRows: Row[]; kitchenRows: Row[]; tableRows: Row[]; receipts: Row[]; search: string; setSearch: (value: string) => void; onSearch: () => void; onRefresh: () => void; onSelect: (order: Row) => void }) {
+type SecondaryViewProps = {
+  view: View;
+  loading: boolean;
+  paymentRows: Row[];
+  kitchenRows: Row[];
+  tableRows: Row[];
+  receipts: Row[];
+  inventoryRows: Row[];
+  warehouses: Row[];
+  purchases: Row[];
+  catalog: Row[];
+  suppliers: Row[];
+  auditEvents: Row[];
+  operationsWarehouse: number;
+  onWarehouseChange: (warehouseId: number) => void;
+  onAdjust: (values: Row) => void;
+  onReorderLevel: (values: Row) => void;
+  onCreatePurchase: (supplierId: number) => void;
+  onAddPurchaseLine: (purchaseId: number, values: Row) => void;
+  onChangePurchaseStatus: (purchaseId: number, action: "order" | "close") => void;
+  onReceivePurchase: (purchaseId: number, values: Row) => void;
+  busy: string;
+  search: string;
+  setSearch: (value: string) => void;
+  onSearch: () => void;
+  onRefresh: () => void;
+  onSelect: (order: Row) => void;
+};
+
+function SecondaryView({
+  view,
+  loading,
+  paymentRows,
+  kitchenRows,
+  tableRows,
+  receipts,
+  inventoryRows,
+  warehouses,
+  purchases,
+  catalog,
+  suppliers,
+  auditEvents,
+  operationsWarehouse,
+  onWarehouseChange,
+  onAdjust,
+  onReorderLevel,
+  onCreatePurchase,
+  onAddPurchaseLine,
+  onChangePurchaseStatus,
+  onReceivePurchase,
+  busy,
+  search,
+  setSearch,
+  onSearch,
+  onRefresh,
+  onSelect,
+}: SecondaryViewProps) {
+  const [adjustmentProduct, setAdjustmentProduct] = useState(1);
+  const [adjustmentQuantity, setAdjustmentQuantity] = useState("1");
+  const [adjustmentReason, setAdjustmentReason] = useState("");
+  const [reorderLevels, setReorderLevels] = useState<Record<string, string>>({});
+  const [purchaseSupplier, setPurchaseSupplier] = useState(1);
+  const [lineDrafts, setLineDrafts] = useState<Record<string, Row>>({});
+  const [receiptDrafts, setReceiptDrafts] = useState<Record<string, Row>>({});
   const titles: Record<View, [string, string]> = {
     order: ["", ""],
     payments: ["02 / Payment", "QR orders"],
@@ -546,10 +736,44 @@ function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, rec
   const description = view === "payments"
     ? "Select a submitted QR order and record cash."
     : view === "kitchen"
-      ? "Paid orders appear here automatically."
+        ? "Paid orders appear here automatically."
       : view === "ready"
         ? "Call customers by name or order number."
-        : "Tables and receipts stay available when needed.";
+        : "Warehouse stock and purchasing stay available when needed.";
+
+  const activeProducts = catalog.filter((item) => item.active !== 0);
+  const lowStockRows = inventoryRows.filter((row) => row.low_stock);
+  const defaultProduct = activeProducts[0]?.id || adjustmentProduct;
+  const defaultSupplier = suppliers[0]?.id || purchaseSupplier;
+
+  function lineDraft(purchase: Row) {
+    return lineDrafts[purchase.id] || {
+      product_id: defaultProduct,
+      warehouse_id: operationsWarehouse,
+      quantity: "1",
+      unit_cost: "0",
+    };
+  }
+
+  function receiptDraft(purchase: Row) {
+    return receiptDrafts[purchase.id] || { quantities: {}, allow_over_receipt: false, override_reason: "" };
+  }
+
+  function updateLineDraft(purchaseId: number, key: string, value: string | number) {
+    const current = lineDrafts[purchaseId] || lineDraft({ id: purchaseId });
+    setLineDrafts((drafts) => ({ ...drafts, [purchaseId]: { ...current, [key]: value } }));
+  }
+
+  function updateReceiptDraft(purchaseId: number, next: Row) {
+    setReceiptDrafts((drafts) => ({ ...drafts, [purchaseId]: next }));
+  }
+
+  function submitAdjustment() {
+    const quantity = Number(adjustmentQuantity);
+    if (!Number.isInteger(quantity) || quantity === 0 || !adjustmentReason.trim()) return;
+    onAdjust({ product_id: adjustmentProduct || defaultProduct, warehouse_id: operationsWarehouse, quantity, reason: adjustmentReason.trim() });
+    setAdjustmentReason("");
+  }
 
   return (
     <section className="secondary-page">
@@ -584,9 +808,56 @@ function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, rec
           )) : <Empty>No orders in this queue.</Empty>}
         </div>
       ) : (
-        <div className="operations-grid">
-          <section className="panel"><span className="eyebrow">Floor reference</span><h3>Tables</h3>{tableRows.length ? <div className="simple-list">{tableRows.map((table) => <div className="simple-row" key={table.id}><div><strong>{table.code}</strong><small>{table.name} · {table.seats} seats</small></div><StatusPill value={table.status} /></div>)}</div> : <Empty>No tables found.</Empty>}</section>
-          <section className="panel"><span className="eyebrow">Sales history</span><h3>Receipts</h3>{receipts.length ? <div className="simple-list">{receipts.slice(0, 8).map((receipt) => <div className="simple-row" key={receipt.id}><div><strong>{receipt.receipt_number}</strong><small>{receipt.order_number} · {receipt.table_code}</small></div><strong>{money(receipt.total)}</strong></div>)}</div> : <Empty>No receipts yet.</Empty>}</section>
+        <div className="operations-stack">
+          <section className="operations-toolbar">
+            <label className="field-inline"><span>Warehouse</span><select className="text-input" value={operationsWarehouse} onChange={(event) => onWarehouseChange(Number(event.target.value))}>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.code} · {warehouse.name}</option>)}</select></label>
+            <div className="operations-summary"><span>{inventoryRows.length} stock records</span><strong>{lowStockRows.length} low stock</strong></div>
+          </section>
+
+          <div className="operations-grid">
+            <section className="panel operations-panel">
+              <span className="eyebrow">Inventory / adjustment</span>
+              <h3>Move stock with a reason</h3>
+              <p className="panel-intro">Positive and negative adjustments are warehouse-scoped. The API blocks reserved or negative stock.</p>
+              <div className="form-grid">
+                <label className="field-label">Product<select className="text-input" value={adjustmentProduct || defaultProduct} onChange={(event) => setAdjustmentProduct(Number(event.target.value))}>{activeProducts.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}</select></label>
+                <label className="field-label">Quantity<input className="text-input" type="number" step="1" value={adjustmentQuantity} onChange={(event) => setAdjustmentQuantity(event.target.value)} /></label>
+              </div>
+              <label className="field-label">Reason<input className="text-input" value={adjustmentReason} onChange={(event) => setAdjustmentReason(event.target.value)} placeholder="Cycle count, damage, correction…" /></label>
+              <button className="action-button primary" disabled={!!busy || !adjustmentReason.trim() || !Number.isInteger(Number(adjustmentQuantity)) || Number(adjustmentQuantity) === 0} onClick={submitAdjustment}>{busy === "inventory-adjustment" ? "Saving…" : "Save adjustment"}</button>
+            </section>
+
+            <section className="panel operations-panel">
+              <span className="eyebrow">Inventory / reorder</span>
+              <h3>Low-stock visibility</h3>
+              {lowStockRows.length ? <div className="simple-list">{lowStockRows.map((row) => <div className="simple-row inventory-row" key={`${row.warehouse_id}-${row.product_id}`}><div><strong>{row.name}</strong><small>{row.available} available · reorder {row.reorder_quantity}</small></div><div className="inline-control"><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[row.product_id] ?? row.reorder_level} onChange={(event) => setReorderLevels({ ...reorderLevels, [row.product_id]: event.target.value })} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[row.product_id] ?? row.reorder_level)) })}>Save</button></div></div>)}</div> : <Empty>No low-stock products in this warehouse.</Empty>}
+              <div className="inventory-table">{inventoryRows.map((row) => <div className="simple-row inventory-row" key={`${row.warehouse_id}-${row.product_id}`}><div><strong>{row.sku} · {row.name}</strong><small>{row.on_hand} on hand · {row.reserved} reserved · available {row.available}</small></div><div className="inline-control"><StatusPill value={row.low_stock ? "low stock" : "healthy"} /><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[row.product_id] ?? row.reorder_level} onChange={(event) => setReorderLevels({ ...reorderLevels, [row.product_id]: event.target.value })} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[row.product_id] ?? row.reorder_level)) })}>Save</button></div></div>)}</div>
+            </section>
+          </div>
+
+          <section className="panel operations-panel purchase-panel">
+            <div className="panel-heading"><div><span className="eyebrow">Purchasing / lifecycle</span><h3>Drafts, receipts, and closeout</h3><p className="panel-intro">Receive each line in parts. Over-receipt requires an authorized override and a reason.</p></div><div className="inline-control"><select className="text-input compact-select" value={purchaseSupplier || defaultSupplier} onChange={(event) => setPurchaseSupplier(Number(event.target.value))}>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select><button className="action-button" disabled={!!busy || !suppliers.length} onClick={() => onCreatePurchase(purchaseSupplier || defaultSupplier)}>{busy === "purchase-create" ? "Creating…" : "New draft"}</button></div></div>
+            {purchases.length ? <div className="purchase-list">{purchases.map((purchase) => {
+              const draft = lineDraft(purchase);
+              const receipt = receiptDraft(purchase);
+              const receiptLines = Object.entries(receipt.quantities || {}).map(([lineId, quantity]) => ({ lineId: Number(lineId), quantity: Number(quantity) })).filter((line) => Number.isInteger(line.quantity) && line.quantity > 0);
+              return <article className="purchase-card" key={purchase.id}>
+                <div className="purchase-heading"><div><span className="eyebrow">{purchase.purchase_number}</span><h3>{purchase.supplier_name}</h3><small>{purchase.lines?.length || 0} lines · {money(purchase.total)}</small></div><StatusPill value={purchase.status} /></div>
+                {purchase.lines?.length ? <div className="purchase-lines">{purchase.lines.map((line: Row) => <div className="purchase-line" key={line.id}><div><strong>{line.product_name}</strong><small>{line.warehouse_code} · {line.received_quantity} / {line.quantity} received · {money(line.unit_cost)} each</small></div>{["ordered", "partially_received"].includes(purchase.status) && <input className="compact-input" aria-label={`Receive ${line.product_name}`} type="number" min="0" max={purchase.status === "received" ? undefined : line.quantity} value={receipt.quantities?.[line.id] ?? ""} onChange={(event) => updateReceiptDraft(purchase.id, { ...receipt, quantities: { ...(receipt.quantities || {}), [line.id]: event.target.value } })} />}</div>)}</div> : <Empty>Add at least one line before ordering.</Empty>}
+                {purchase.status === "draft" && <div className="purchase-form"><select className="text-input" value={draft.product_id} onChange={(event) => updateLineDraft(purchase.id, "product_id", Number(event.target.value))}>{activeProducts.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}</select><select className="text-input" value={draft.warehouse_id} onChange={(event) => updateLineDraft(purchase.id, "warehouse_id", Number(event.target.value))}>{warehouses.map((warehouse) => <option key={warehouse.id} value={warehouse.id}>{warehouse.code}</option>)}</select><input className="text-input" type="number" min="1" value={draft.quantity} onChange={(event) => updateLineDraft(purchase.id, "quantity", event.target.value)} /><input className="text-input" type="number" min="0" step="0.01" value={draft.unit_cost} onChange={(event) => updateLineDraft(purchase.id, "unit_cost", event.target.value)} /><button className="action-button" disabled={!!busy || !activeProducts.length} onClick={() => onAddPurchaseLine(purchase.id, { product_id: Number(draft.product_id), warehouse_id: Number(draft.warehouse_id), quantity: Number(draft.quantity), unit_cost: Number(draft.unit_cost) })}>{busy === `purchase-line-${purchase.id}` ? "Adding…" : "Add line"}</button></div>}
+                {purchase.status === "draft" && <button className="action-button primary" disabled={!!busy || !purchase.lines?.length} onClick={() => onChangePurchaseStatus(purchase.id, "order")}>{busy === `purchase-order-${purchase.id}` ? "Ordering…" : "Mark ordered"}</button>}
+                {["ordered", "partially_received"].includes(purchase.status) && <div className="receipt-form"><label className="check-label"><input type="checkbox" checked={!!receipt.allow_over_receipt} onChange={(event) => updateReceiptDraft(purchase.id, { ...receipt, allow_over_receipt: event.target.checked })} /> Authorized over-receipt</label>{receipt.allow_over_receipt && <input className="text-input" value={receipt.override_reason || ""} onChange={(event) => updateReceiptDraft(purchase.id, { ...receipt, override_reason: event.target.value })} placeholder="Manager/admin reason" />}<button className="action-button primary" disabled={!!busy || !receiptLines.length || (receipt.allow_over_receipt && !receipt.override_reason?.trim())} onClick={() => onReceivePurchase(purchase.id, { lines: receiptLines.map((line) => { const source = purchase.lines.find((candidate: Row) => candidate.id === line.lineId); return { product_id: source.product_id, warehouse_id: source.warehouse_id, quantity: line.quantity }; }), allow_over_receipt: !!receipt.allow_over_receipt, override_reason: receipt.override_reason?.trim() || null })}>{busy === `purchase-receive-${purchase.id}` ? "Receiving…" : "Receive selected"}</button></div>}
+                {purchase.status === "received" && <button className="action-button primary" disabled={!!busy} onClick={() => onChangePurchaseStatus(purchase.id, "close")}>{busy === `purchase-close-${purchase.id}` ? "Closing…" : "Close purchase"}</button>}
+              </article>;
+            })}</div> : <Empty>No purchases yet. Create a draft to begin.</Empty>}
+          </section>
+
+          <div className="operations-grid">
+            <section className="panel"><span className="eyebrow">Floor reference</span><h3>Tables</h3>{tableRows.length ? <div className="simple-list">{tableRows.map((table) => <div className="simple-row" key={table.id}><div><strong>{table.code}</strong><small>{table.name} · {table.seats} seats</small></div><StatusPill value={table.status} /></div>)}</div> : <Empty>No tables found.</Empty>}</section>
+            <section className="panel"><span className="eyebrow">Sales history</span><h3>Receipts</h3>{receipts.length ? <div className="simple-list">{receipts.slice(0, 8).map((receipt) => <div className="simple-row" key={receipt.id}><div><strong>{receipt.receipt_number}</strong><small>{receipt.order_number} · {receipt.table_code}</small></div><strong>{money(receipt.total)}</strong></div>)}</div> : <Empty>No receipts yet.</Empty>}</section>
+          </div>
+
+          <section className="panel audit-panel"><span className="eyebrow">Audit trail</span><h3>Inventory and purchasing events</h3>{auditEvents.length ? <div className="simple-list">{auditEvents.slice(0, 12).map((event) => <div className="simple-row" key={event.id}><div><strong>{label(event.event_type)}</strong><small>{event.detail || "No detail"}</small></div><small>{event.created_at}</small></div>)}</div> : <Empty>No operational events yet.</Empty>}</section>
         </div>
       )}
     </section>
