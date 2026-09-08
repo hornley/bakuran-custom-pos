@@ -1,6 +1,6 @@
 # Bakuran POS System Draft#1
 
-Local restaurant POS for counter pickup, guided cash payment, customer-facing table QR ordering, kitchen flow, local delivery dispatch, and optional table operations. QR orders are submitted publicly from an open table session and then paid in cash by front-desk staff; delivery orders are dispatched locally by active drivers.
+Local restaurant POS for counter pickup, guided cash payment, customer-facing table QR ordering, kitchen flow, local delivery dispatch, optional table operations, and a secondary warehouse-scoped inventory/purchasing workspace. QR orders are submitted publicly from an open table session and then paid in cash by front-desk staff; delivery orders are dispatched locally by active drivers.
 
 This is the generated Bakuran POS project. The commands below are project-local and intentionally use only these fixed ports:
 
@@ -17,6 +17,7 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`docs/phases/phase-5.md`](docs/phases/phase-5.md): delivery workflow handoff and approval checklist.
 - [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
 - [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
+- [`docs/phases/phase-4-inventory-purchasing.md`](docs/phases/phase-4-inventory-purchasing.md): inventory/purchasing vertical slice, checks, and approval gate.
 - [`docs/features/customer-qr-ordering.md`](docs/features/customer-qr-ordering.md): current customer QR vertical slice, contract, checks, and limitations.
 
 ## Run the project
@@ -70,8 +71,9 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 - Delivery: create cash-only delivery orders, validate address/contact metadata, assign active drivers, and track dispatch through delivered, failed, or cancelled outcomes from the secondary delivery board.
 - Attendance: review employee attendance status.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
+- Operations: review warehouse-scoped inventory, low-stock/reorder levels, purchase lifecycle progress, receipts, and audit events.
 
-Purchasing and inventory APIs remain available as deferred back-office capabilities, but they are not loaded or used by the focused POS desk.
+Inventory and purchasing load only after the secondary `Operations` route is selected. They never gate POS menu entry, payment, or the unpaid-order kitchen gate.
 
 The UI includes loading, empty, recoverable error, successful mutation, and mutation-busy states. Successful mutations reload the desk data while recoverable errors preserve the last valid view.
 
@@ -103,6 +105,19 @@ GET /api/attendance
 GET /api/settings
 GET /api/notifications
 GET /api/search
+GET /api/warehouses
+GET /api/inventory
+GET /api/inventory/low-stock
+GET /api/inventory/reorder
+PUT /api/inventory/reorder-level
+POST /api/stock/adjustment
+POST /api/stock/receipt
+GET /api/purchases
+POST /api/purchases
+POST /api/purchases/{purchase_id}/lines
+POST /api/purchases/{purchase_id}/order
+POST /api/purchases/{purchase_id}/receive
+POST /api/purchases/{purchase_id}/close
 GET /api/customer/tables/{token}
 GET /api/customer/tables/{token}/menu
 POST /api/customer/tables/{token}/orders
@@ -112,9 +127,10 @@ GET /api/delivery/drivers
 POST /api/orders/{order_id}/delivery
 POST /api/delivery/{delivery_id}/assign
 POST /api/delivery/{delivery_id}/callback
+GET /api/audit-events
 ```
 
-Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. Inventory and purchasing endpoints remain available as deferred back-office APIs, but the POS frontend does not load or use them. The frontend uses `/api/receipts` for sales receipts.
+Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. The Operations route uses explicit warehouse filters, reasoned signed adjustments, per-line purchase receipts, and durable idempotency keys for supported mutations. The frontend uses `/api/receipts` for sales receipts. The legacy no-body purchase receive endpoint remains available for older clients and records an implicit ordered transition before completion; legacy stock receipts accept an optional idempotency key.
 
 Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order; only the authenticated front desk can record cash and release that order to kitchen.
 
@@ -125,6 +141,8 @@ Delivery mutations are payment-gated, use transaction-safe guarded transitions, 
 The current manifest uses `auth_profile: disabled`, but operator mutations are still denied by default. Set `AUTH_LOCAL_DEV_BYPASS=true` only for a trusted local development instance that intentionally uses the legacy open desk. For protected operator access, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`, then configure `AUTH_BOOTSTRAP_USERNAME` and `AUTH_BOOTSTRAP_PASSWORD` on first startup. In local auth mode, operator reads and mutations require a session, mutations also require the CSRF token, and role checks remain active. `GET /api/health` and `/api/auth/login`, `/api/auth/logout`, and `/api/auth/session` remain public; customer bearer tokens do not grant operator access. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
 
 Customer QR endpoints are intentionally public bearer-token routes. They do not grant access to operator endpoints, and the customer frontend omits operator cookies. QR tokens are session-scoped and stored only as hashes.
+
+When local auth is enabled, authenticated operators can use normal operations mutations, viewers remain read-only, and over-receipt overrides require a manager or admin role. Audit events include the local actor when available. With auth disabled, the local deployment preserves its existing optional-auth behavior.
 
 ## Troubleshooting
 
@@ -138,4 +156,4 @@ If another application owns either port, stop that application before running `.
 
 ## Boundaries
 
-This is a local single-store SQLite operational slice. It does not include multi-location synchronization, reservations, external payment gateways, online card payment, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers.
+This is a local, single-store SQLite operational slice. It does not include multi-location synchronization or transfers, reservations, external payment gateways, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers.
