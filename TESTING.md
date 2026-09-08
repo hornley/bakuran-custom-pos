@@ -74,4 +74,12 @@ git diff --check
 
 The suite covers delivery-channel creation, address/contact/contact-name validation, metadata isolation, payment and cash-only gates, invalid transition rollback, active-driver assignment and reassignment history, duplicate callbacks and idempotency-key conflicts, failed/cancelled outcomes, optional-auth viewer denial with audit evidence, and delivery audit records. The board is a local operational view; this phase intentionally has no external courier, webhook, driver app, GPS, or route-optimization integration.
 
+Phase 5 validation observed on 2026-09-08:
+
+- Focused delivery pytest: `8 passed`.
+- Full `./test.sh`: `25 passed` backend, `4 passed` frontend tests in 2 files, and production build passed.
+- `git diff --check`: passed.
+- Known output is limited to the existing Starlette/httpx, anyio, and `app.seed` deprecation/runtime warnings.
+- No live browser/E2E or external courier integration was exercised; the board contract is covered by Vitest and the application bundle by the production build.
+
 The backend regression suite also checks duplicate and concurrent payment/release idempotency, full lifecycle receipt/close behavior, and invalid kitchen transition conflicts without mutation.
