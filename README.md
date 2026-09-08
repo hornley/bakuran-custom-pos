@@ -104,8 +104,10 @@ GET /api/search
 GET /api/warehouses
 GET /api/inventory
 GET /api/inventory/low-stock
+GET /api/inventory/reorder
 PUT /api/inventory/reorder-level
 POST /api/stock/adjustment
+POST /api/stock/receipt
 GET /api/purchases
 POST /api/purchases
 POST /api/purchases/{purchase_id}/lines
@@ -115,7 +117,7 @@ POST /api/purchases/{purchase_id}/close
 GET /api/audit-events
 ```
 
-Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. The Operations route uses explicit warehouse filters, reasoned signed adjustments, per-line purchase receipts, and durable idempotency keys for supported mutations. The frontend uses `/api/receipts` for sales receipts. The legacy no-body purchase receive endpoint remains available for older clients.
+Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. The Operations route uses explicit warehouse filters, reasoned signed adjustments, per-line purchase receipts, and durable idempotency keys for supported mutations. The frontend uses `/api/receipts` for sales receipts. The legacy no-body purchase receive endpoint remains available for older clients and records an implicit ordered transition before completion; legacy stock receipts accept an optional idempotency key.
 
 ## Authentication
 

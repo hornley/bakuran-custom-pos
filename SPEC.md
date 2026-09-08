@@ -222,7 +222,7 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `POST /api/purchases/{purchase_id}/close` | Close a fully received purchase |
 | `GET /api/audit-events` | List inventory and purchasing audit events |
 
-The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it receives all outstanding lines and returns the historical purchase-row response. New clients should send explicit receipt lines.
+The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it records a draft as ordered, receives all outstanding lines, and returns the historical purchase-row response. New clients should send explicit receipt lines. The legacy `POST /api/stock/receipt` endpoint remains available and supports an optional idempotency key for safe retries.
 
 ### Order metadata
 

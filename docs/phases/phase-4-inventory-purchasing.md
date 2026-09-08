@@ -2,7 +2,7 @@
 
 **Status:** Implemented; awaiting explicit developer approval
 **Branch:** `feat/inventory-purchasing-workflow`
-**Base:** `da40b9e` (`origin/main`)
+**Base:** `57fe8f3` (`origin/main`)
 
 ## Purpose
 
@@ -18,7 +18,7 @@ Add a warehouse-aware back-office slice without changing the compact counter flo
 - Supported mutations persist idempotency request fingerprints and replay their stored responses without double mutation; payload/key conflicts return HTTP 409.
 - Inventory and purchasing mutations write transactional audit events, including optional-auth actor IDs.
 - The secondary Operations UI loads warehouse stock, low-stock/reorder controls, purchase lifecycle controls, receipts, tables, and audit history only after navigation; the compact counter screen remains focused on POS/payment/kitchen flow.
-- Legacy no-body purchase receiving and `/api/stock/receipt` remain compatible where safe, and the existing payment gate is unchanged.
+- Legacy no-body purchase receiving and `/api/stock/receipt` remain compatible where safe, with optional durable retry keys for legacy receipts; the existing payment gate is unchanged.
 
 ## Scope limitation
 
@@ -26,11 +26,13 @@ This is a single-store implementation. Warehouses scope stock inside one store; 
 
 ## Verification
 
-- Focused inventory/purchasing backend tests cover rollback, concurrency, partial receipts, per-line completion, over-receipt, idempotency, invalid references, database constraints, optional-auth denial/authorization, and audit records.
-- Frontend contract tests cover secondary loading boundaries and responsive inventory/purchasing controls.
-- Full `./test.sh`.
-- Frontend production build and type-check.
-- `git diff --check`.
+- Focused inventory/purchasing backend tests: `24 passed` with 2 existing dependency deprecation warnings.
+- Full backend suite: `41 passed` with 3 existing warnings.
+- Frontend Vitest suite: `5 passed` in 1 file.
+- Frontend production build and TypeScript check: passed.
+- Root `./test.sh`: passed.
+- `git diff --check`: passed.
+- Independent read-only review completed; it found and the coordinator fixed legacy migration, warehouse initialization, retry, and stale UI-state gaps. No live browser/E2E review was available.
 
 The final handoff records the exact commands and observed results in `TESTING.md` and the pull request description. Tests use temporary databases and do not reset, seed, or mutate `backend/data/app.db`.
 
