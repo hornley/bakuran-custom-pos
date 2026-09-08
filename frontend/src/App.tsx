@@ -19,9 +19,9 @@ const steps: Array<[Step, string]> = [
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
     credentials: "include",
     headers: { ...csrfHeaders(), "Content-Type": "application/json", ...(options?.headers || {}) },
-    ...options,
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || body.message || "The request could not be completed.");

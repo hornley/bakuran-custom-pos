@@ -98,6 +98,49 @@ describe("counter operational flows", () => {
     await act(async () => root.unmount());
   });
 
+  it("preserves default and idempotency headers for delivery mutations", async () => {
+    Object.defineProperty(document, "cookie", { configurable: true, value: "local_csrf=test-token" });
+    const delivery = {
+      id: 7,
+      order_number: "ORD-0007",
+      contact_name: "Mika",
+      customer_name: "Mika",
+      address: "12 Mabini Street, Cebu City",
+      contact: "09171234567",
+      order_total: 18,
+      status: "assigned",
+      driver_id: 1,
+      driver: { name: "Ari Santos" },
+      assignments: [{ id: 1, driver_name: "Ari Santos", status: "active" }],
+    };
+    const requests: Array<{ url: string; options?: RequestInit }> = [];
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      requests.push({ url, options });
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/delivery")) return response([delivery]);
+      if (url.endsWith("/api/delivery/drivers")) return response([{ id: 1, name: "Ari Santos" }]);
+      return response(url.endsWith("/out-for-delivery") ? {} : [delivery]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => { button(container, "Delivery").click(); });
+    await settle();
+    await act(async () => { button(container, "Out for delivery").click(); });
+    await settle();
+
+    const mutation = requests.find(({ url }) => url.endsWith("/api/delivery/7/out-for-delivery"));
+    expect(mutation?.options).toEqual(expect.objectContaining({
+      credentials: "include",
+      headers: {
+        "X-CSRF-Token": "test-token",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "desk-out-for-delivery-7-",
+      },
+    }));
+    await act(async () => root.unmount());
+    Object.defineProperty(document, "cookie", { configurable: true, value: "" });
+  });
+
   it("shows a recoverable API error without losing the order UI", async () => {
     let fail = true;
     const fetchMock = vi.fn((url: string) => {
