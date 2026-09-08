@@ -15,6 +15,16 @@ def seed(c):
     items=[(1,'BRG-001',1,'House Burger','Beef burger with fries',18.0),(2,'PAS-001',1,'Garden Pasta','Seasonal vegetables and herbs',16.0),(3,'LEM-001',2,'Lemonade','Fresh house lemonade',5.0),(4,'COF-001',2,'House Coffee','Locally roasted coffee',4.0)]
     for row in items: c.execute("INSERT OR IGNORE INTO menu_items VALUES (?,?,?,?,?,?,1)",row)
     for item_id, qty in [(1,20),(2,20),(3,30),(4,30)]: c.execute("INSERT OR IGNORE INTO inventory VALUES (?,?,?, ?,0,?)",(item_id,item_id,1,qty,SEED_TIMESTAMP))
+    c.executemany(
+        """
+        INSERT OR IGNORE INTO delivery_drivers(id, code, name, contact, active, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (1, "DRV-001", "Ari Santos", "09171234567", 1, SEED_TIMESTAMP),
+            (2, "DRV-002", "Ben Cruz", "09179876543", 1, SEED_TIMESTAMP),
+        ],
+    )
     if not c.execute("SELECT 1 FROM table_sessions WHERE id=1").fetchone():
         c.execute("INSERT INTO table_sessions VALUES (1,'SES-0001',1,'closed',?,?)",(SEED_TIMESTAMP,SEED_TIMESTAMP))
         c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel) VALUES (1,'ORD-0001',1,'closed',23,23,?,?,?,?,?,'Walk-in Customer','table')",(SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP))

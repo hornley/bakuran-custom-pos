@@ -162,6 +162,17 @@ def record_event(actor_user_id: int | None, event_type: str, path: str = "", det
         _record_event(connection, actor_user_id, event_type, path, detail)
 
 
+def record_event_in_connection(
+    connection: sqlite3.Connection,
+    actor_user_id: int | None,
+    event_type: str,
+    path: str = "",
+    detail: str = "",
+) -> None:
+    """Write an audit event in the caller's transaction."""
+    _record_event(connection, actor_user_id, event_type, path, detail)
+
+
 def initialize_auth() -> None:
     if not auth_enabled():
         return
