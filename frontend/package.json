@@ -16,7 +16,10 @@
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "typescript": "^5.9.2",
-    "vite": "^7.1.4",
+    "vite": "^7.1.4"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1",
     "vitest": "^5.0.0"
   }
 }

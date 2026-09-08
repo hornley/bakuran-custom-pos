@@ -15,6 +15,8 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`TESTING.md`](TESTING.md): short verification instructions for the current changes.
 - [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
 - [`docs/phases/phase-5.md`](docs/phases/phase-5.md): delivery workflow handoff and approval checklist.
+- [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
+- [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
 
 ## Run the project
 
