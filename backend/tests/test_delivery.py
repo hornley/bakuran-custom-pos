@@ -106,6 +106,7 @@ def test_delivery_confirmation_and_assignment_require_payment_and_metadata(clien
 
 def test_delivery_transitions_are_guarded_and_idempotent(client):
     oid, delivery_id = _pay_delivery(client)
+    assert [row["id"] for row in client.get("/api/delivery").json()] == [delivery_id]
 
     before_invalid = client.get(f"/api/delivery/{delivery_id}").json()
     direct_departure = client.post(f"/api/delivery/{delivery_id}/out-for-delivery", json={})
