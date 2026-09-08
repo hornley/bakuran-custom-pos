@@ -6,7 +6,18 @@ Run the current checks from the repository root:
 ./test.sh
 ```
 
-`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend production build. No virtual-environment activation or directory change is required.
+`test.sh` runs backend pytest with `backend/.venv/bin/python` when it exists, then runs the frontend contract tests and production build. No virtual-environment activation or directory change is required.
+
+For the phase-4 vertical slice, run the focused backend suite and dependency-free frontend contract tests directly:
+
+```bash
+cd backend && .venv/bin/python -m pytest -q tests/test_inventory_purchasing.py
+cd frontend && npm test
+cd frontend && npm run build
+git diff --check
+```
+
+The focused backend tests cover warehouse/product validation, low-stock and reorder levels, reasoned signed adjustments, partial and over-receipts, per-line completion, multi-line rollback, durable idempotency and concurrent retries, optional-auth role denial/authorization, database constraints, and audit records. The frontend tests confirm that Operations remains secondary, inventory/purchasing/audit endpoints are wired, and the responsive safety-critical controls remain present.
 
 The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
 
@@ -36,8 +47,10 @@ Supported values for `queue` are `active` and `ready`; other values return HTTP 
 
 ## Current phase handoff
 
-- Backend tests: `11 passed`
-- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
-- Frontend build: passed
-- Database: isolated temporary test databases
-- Phase status: awaiting developer approval
+- Backend tests: phase-4 focused and full-suite results are recorded in the phase handoff and PR description.
+- Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state.
+- Frontend tests/type/build: `npm test` and `npm run build`.
+- Database: every automated test uses an isolated temporary SQLite database; no test mutation targets `backend/data/app.db`.
+- Phase status: implemented; awaiting explicit developer approval. Do not merge this branch.
+
+Inventory and purchasing are single-store in this phase. Warehouse IDs scope records within the store; multi-location synchronization, transfers, and cross-store reporting are not implemented.

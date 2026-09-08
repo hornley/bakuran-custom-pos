@@ -13,6 +13,12 @@ printf '%s\n' 'Running backend tests with an isolated pytest database...'
   "$PYTHON_BIN" -m pytest -q
 )
 
+printf '%s\n' 'Running frontend contract tests...'
+(
+  cd "$ROOT_DIR/frontend"
+  npm test
+)
+
 printf '%s\n' 'Building the frontend...'
 (
   cd "$ROOT_DIR/frontend"

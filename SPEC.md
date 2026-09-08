@@ -37,7 +37,7 @@ There is no payment gateway. Payments are recorded by front-desk staff as cash t
 - Let staff identify pickup orders by customer name and order number.
 - Keep QR orders connected to the front desk without requiring scanning or manual order-number typing.
 - Keep operational reference views secondary to order entry.
-- Do not introduce inventory or purchasing work into the POS flow.
+- Keep inventory and purchasing work in the secondary Operations workspace; it must not block POS ordering, payment, or kitchen release.
 
 ## 3. User roles
 
@@ -62,6 +62,10 @@ Kitchen staff can use the kitchen queue to advance paid orders through preparati
 
 The future customer-facing QR route will allow a customer to select menu items from their table, provide a calling name, and submit an unpaid order. That customer-facing route is not part of the current frontend implementation. The current POS supports the connected front-desk payment queue required after submission.
 
+### Operations staff and local authentication
+
+Inventory and purchasing are optional back-office capabilities. With local authentication disabled, the local deployment keeps the existing unauthenticated workflow. When local authentication is enabled, authenticated operators can perform normal operational mutations, viewers are read-only, and over-receipt overrides require a `manager` or `admin` role. Audit events record the authenticated actor when one exists.
+
 ## 4. Front-desk UI
 
 ### 4.1 Initial screen
@@ -81,7 +85,7 @@ It must not preload:
 - Historical receipts.
 - Dashboard metrics.
 - Kitchen history.
-- Inventory or purchasing data.
+- Inventory or purchasing data. Those resources load only after `Operations` is selected.
 
 ### 4.2 Manual order flow
 
@@ -203,6 +207,22 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `GET /api/kitchen` | List kitchen tickets |
 | `GET /api/receipts` | List sales receipts |
 | `GET /api/tables` | Secondary operations reference |
+| `GET /api/warehouses` | List active warehouse scopes |
+| `POST /api/warehouses` | Create an active warehouse scope |
+| `GET /api/inventory` | List warehouse-scoped stock and movements |
+| `GET /api/inventory/low-stock` | List stock at or below reorder level |
+| `GET /api/inventory/reorder` | Compatibility alias for low-stock visibility |
+| `PUT /api/inventory/reorder-level` | Set a product/warehouse reorder level |
+| `POST /api/stock/adjustment` | Apply a reasoned signed stock adjustment |
+| `GET /api/purchases` | List purchases with receipt progress per line |
+| `POST /api/purchases` | Create a draft purchase |
+| `POST /api/purchases/{purchase_id}/lines` | Add a validated product/warehouse line to a draft |
+| `POST /api/purchases/{purchase_id}/order` | Move a draft purchase to ordered |
+| `POST /api/purchases/{purchase_id}/receive` | Receive selected quantities, including partial receipts |
+| `POST /api/purchases/{purchase_id}/close` | Close a fully received purchase |
+| `GET /api/audit-events` | List inventory and purchasing audit events |
+
+The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it receives all outstanding lines and returns the historical purchase-row response. New clients should send explicit receipt lines.
 
 ### Order metadata
 
@@ -214,6 +234,18 @@ Orders support:
 - Optional `table_id` and table context
 - Payment state
 - Kitchen eligibility and ticket state
+
+### Inventory and purchasing contract
+
+- Every stock row is scoped by an active product and active warehouse. The database also enforces product/warehouse foreign keys and `on_hand >= reserved >= 0`.
+- Inventory responses expose `on_hand`, `reserved`, `available`, `reorder_level`, `low_stock`, and `reorder_quantity`. Low stock is `available <= reorder_level`.
+- A stock adjustment requires a non-zero signed quantity and a non-blank reason. It is atomic and cannot make on-hand stock negative or lower than reserved stock.
+- Purchase status follows `draft -> ordered -> partially_received -> received -> closed`. Draft lines require active product and warehouse references and have positive quantity and non-negative unit cost.
+- Each purchase line tracks `received_quantity`. A receipt validates every line before mutating any inventory, so a multi-line failure rolls back all lines.
+- A receipt cannot exceed a line's ordered quantity unless `allow_over_receipt=true`, a non-blank `override_reason` is supplied, and local auth (when enabled) identifies a `manager` or `admin` actor.
+- Explicit idempotency keys are persisted with a request fingerprint and response. Repeating the same operation replays the stored response; reusing a key with a different operation or payload returns a conflict.
+- Inventory and purchasing mutations write audit events in the same transaction. Optional-auth requests record a null actor; authenticated requests record the local user id.
+- The POS does not automatically reserve, deplete, or gate menu sales on inventory in this phase. The payment gate remains authoritative: unpaid orders cannot enter the kitchen.
 
 ## 7. Error and recovery behavior
 
@@ -231,13 +263,13 @@ Orders support:
 The current POS does not include:
 
 - Payment gateway integration.
-- Inventory management or stock mutation.
-- Purchasing or supplier workflows.
 - A customer-facing QR ordering page.
 - Order cancellation, voids, or refunds.
-- Staff accounts, permissions, or attendance management.
+- Hosted identity and staff administration beyond the optional local-auth module.
 - Automatic customer notifications.
 - Delivery or table-service settlement workflows.
+- Multi-store synchronization or cross-location transfers. This phase is limited to one store with warehouse-scoped records.
+- Recipe-level stock depletion, automatic sale reservations, tax, discounts, or purchase invoicing.
 
 ## 9. Acceptance criteria
 
@@ -264,6 +296,17 @@ The current POS does not include:
 5. Staff records cash payment.
 6. The existing order number is preserved.
 7. The paid order enters the kitchen with its table context when available.
+
+### Inventory and purchasing
+
+1. Staff opens `Operations` as a secondary route; the compact counter entry screen does not load inventory or purchasing data.
+2. Stock is filtered by an active warehouse and exposes low-stock rows using available quantity versus reorder level.
+3. A signed stock adjustment requires a reason and preserves non-negative, non-reserved stock.
+4. A purchase moves through draft, ordered, partially received, received, and closed states.
+5. Each receipt updates only the selected purchase-line quantities and supports a later partial receipt.
+6. Over-receipt is rejected unless the request includes a reason and, when auth is enabled, a manager/admin actor.
+7. A failed multi-line receipt leaves every inventory row, purchase line, movement, and audit event unchanged.
+8. Repeated idempotent requests replay once without double-mutating inventory; payload conflicts return a conflict.
 
 ### System validation
 
@@ -292,7 +335,9 @@ Run validation:
 
 ```bash
 cd backend && .venv/bin/python -m pytest -q
-cd frontend && npm run build
+cd frontend && npm test && npm run build
 ```
 
 The application can be hosted on `0.0.0.0` for access from another device using the host machine's LAN or tailnet address.
+
+Inventory and purchasing are intentionally single-store in this phase. Warehouse IDs scope stock within the store, but there is no multi-location synchronization, transfer workflow, or cross-store reporting.
