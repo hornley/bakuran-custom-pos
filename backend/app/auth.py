@@ -20,12 +20,14 @@ from .generated_metadata import AUTH_PROFILE
 
 ROLES = ("admin", "manager", "operator", "viewer")
 PUBLIC_PATHS = {"/api/health", "/api/auth/login", "/api/auth/logout", "/api/auth/session"}
+PUBLIC_PREFIXES = ("/api/customer/tables/",)
 PASSWORD_N = 2**14
 PASSWORD_R = 8
 PASSWORD_P = 1
 SESSION_TTL_HOURS = 8
 DEFAULT_ALLOWED_ORIGINS = (
     "http://localhost:5200",
+    "http://127.0.0.1:5200",
     "http://100.108.61.26:5200",
     "http://localhost:5174",
     "http://localhost:5200",
@@ -281,7 +283,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if not auth_enabled() or not request.url.path.startswith("/api/"):
             return await call_next(request)
-        if request.url.path in PUBLIC_PATHS or request.method.upper() == "OPTIONS":
+        if request.url.path in PUBLIC_PATHS or request.url.path.startswith(PUBLIC_PREFIXES) or request.method.upper() == "OPTIONS":
             if request.url.path == "/api/auth/logout" and request.method.upper() not in {"GET", "HEAD"} and request.cookies.get("local_session") and not _csrf_valid(request):
                 record_event(None, "auth.csrf_denied", request.url.path, "CSRF validation failed")
                 return JSONResponse({"detail": "CSRF validation failed."}, status_code=403)

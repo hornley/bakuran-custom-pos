@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hashlib
+import json
+import secrets
 import sqlite3
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from .db import connect, initialize
 from .auth import AUTH_ALLOWED_ORIGINS, AuthMiddleware, initialize_auth, router as auth_router
 
@@ -57,6 +60,33 @@ class OrderStartIn(BaseModel):
             raise ValueError("order_channel must be table, qr, or counter")
         return value
 
+class CustomerLineIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    menu_item_id: int = Field(gt=0, strict=True)
+    quantity: int = Field(gt=0, le=20, strict=True)
+
+class CustomerOrderIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    customer_name: str = Field(min_length=1, max_length=80, strict=True)
+    lines: list[CustomerLineIn] = Field(min_length=1, max_length=50)
+
+    @field_validator("customer_name")
+    @classmethod
+    def customer_name_valid(cls, value):
+        value = value.strip()
+        if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+            raise ValueError("customer_name must not be blank")
+        return value
+
+    @field_validator("lines")
+    @classmethod
+    def lines_valid(cls, value):
+        if len({line.menu_item_id for line in value}) != len(value):
+            raise ValueError("lines must contain each menu item only once")
+        return value
+
 def rows(c, sql, params=()): return [dict(x) for x in c.execute(sql, params).fetchall()]
 def fail(message, status=400): raise HTTPException(status_code=status, detail=message)
 def get(c, table, ident):
@@ -66,10 +96,121 @@ def get(c, table, ident):
 def order_view(c, oid):
     o = get(c, "restaurant_orders", oid)
     return {"order": dict(o), "lines": rows(c, "SELECT * FROM restaurant_order_lines WHERE order_id=? ORDER BY id", (oid,)), "ticket": next(iter(rows(c, "SELECT * FROM kitchen_tickets WHERE order_id=?", (oid,))), None), "payment": next(iter(rows(c, "SELECT * FROM payments WHERE order_id=?", (oid,))), None), "receipt": next(iter(rows(c, "SELECT * FROM receipts WHERE order_id=?", (oid,))), None)}
-def table_view(c, table_id):
-    t = dict(get(c, "dining_tables", table_id)); s = c.execute("SELECT * FROM table_sessions WHERE table_id=? AND status='open'", (table_id,)).fetchone(); t["session"] = dict(s) if s else None
+def table_view(c, table_id, qr_token=None):
+    t = dict(get(c, "dining_tables", table_id)); s = c.execute("SELECT id,session_number,table_id,status,opened_at,closed_at FROM table_sessions WHERE table_id=? AND status='open'", (table_id,)).fetchone(); t["session"] = dict(s) if s else None
+    if qr_token and t["session"]:
+        t["qr_token"] = qr_token
+        t["session"]["qr_token"] = qr_token
     if s: t["order"] = next(iter(rows(c, "SELECT * FROM restaurant_orders WHERE session_id=? AND status!='closed'", (s["id"],))), None)
     return t
+
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+def _customer_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+MAX_CUSTOMER_TOKEN_LENGTH = 128
+MAX_CUSTOMER_IDEMPOTENCY_KEY_LENGTH = 128
+CUSTOMER_ORDER_FIELDS = (
+    "id", "order_number", "status", "subtotal", "total", "created_at",
+    "sent_at", "served_at", "paid_at", "closed_at", "customer_name", "order_channel",
+)
+CUSTOMER_LINE_FIELDS = ("id", "order_id", "menu_item_id", "item_name", "quantity", "unit_price", "line_total")
+
+
+def customer_session(c, token: str):
+    if not token or len(token) > MAX_CUSTOMER_TOKEN_LENGTH:
+        fail("Invalid table QR token", 404)
+    session = c.execute(
+        "SELECT s.id, s.session_number, s.table_id, s.status, s.opened_at, s.closed_at, t.code table_code, t.name table_name FROM table_sessions s JOIN dining_tables t ON t.id=s.table_id WHERE s.qr_token_hash=? AND s.status='open'",
+        (_token_hash(token),),
+    ).fetchone()
+    if not session:
+        fail("Invalid or closed table QR token", 404)
+    return session
+
+def customer_view(c, session):
+    table = dict(c.execute("SELECT id,code,name,seats,status FROM dining_tables WHERE id=?", (session["table_id"],)).fetchone())
+    return {"table": table, "session": {"id": session["id"], "session_number": session["session_number"], "status": session["status"]}, "menu": customer_menu(c, session)}
+
+def customer_menu(c, _session=None):
+    return rows(c, "SELECT m.id, m.sku, m.category_id, m.name, m.description, m.price, c.code category_code, c.name category_name FROM menu_items m JOIN menu_categories c ON c.id=m.category_id WHERE m.active=1 AND c.active=1 ORDER BY c.id,m.id")
+
+def customer_order_view(c, order_id):
+    value = order_view(c, order_id)
+    order = value["order"]
+    table = c.execute("SELECT t.code table_code,t.name table_name FROM table_sessions s JOIN dining_tables t ON t.id=s.table_id WHERE s.id=?", (order["session_id"],)).fetchone()
+    public_order = {field: order[field] for field in CUSTOMER_ORDER_FIELDS if field in order}
+    public_lines = [
+        {field: line[field] for field in CUSTOMER_LINE_FIELDS if field in line}
+        for line in value["lines"]
+    ]
+    public_ticket = {"status": value["ticket"]["status"]} if value["ticket"] else None
+    public_payment = {"status": value["payment"]["status"]} if value["payment"] else None
+    public_receipt = (
+        {"receipt_number": value["receipt"]["receipt_number"], "total": value["receipt"]["total"]}
+        if value["receipt"] else None
+    )
+    result = {
+        "order": public_order,
+        "lines": public_lines,
+        "ticket": public_ticket,
+        "payment": public_payment,
+        "receipt": public_receipt,
+    }
+    if table:
+        result["table"] = dict(table)
+    return result
+
+def customer_fingerprint(customer_name, lines):
+    normalized = sorted(lines, key=lambda item: (item["menu_item_id"], item["quantity"]))
+    return hashlib.sha256(json.dumps({"customer_name": customer_name, "lines": normalized}, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def normalize_idempotency_key(value: str | None) -> str:
+    if value is None:
+        fail("A client idempotency key is required", 400)
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(value) > MAX_CUSTOMER_IDEMPOTENCY_KEY_LENGTH
+        or len(normalized) > MAX_CUSTOMER_IDEMPOTENCY_KEY_LENGTH
+        or any(ord(character) < 33 or ord(character) == 127 for character in normalized)
+    ):
+        fail("A client idempotency key is required and must be at most 128 characters", 400)
+    return normalized
+
+
+def create_customer_order(c, session, payload, idempotency_key):
+    idempotency_key = normalize_idempotency_key(idempotency_key)
+    normalized_lines = [{"menu_item_id": line.menu_item_id, "quantity": line.quantity} for line in payload.lines]
+    fingerprint = customer_fingerprint(payload.customer_name, normalized_lines)
+    existing = c.execute("SELECT id,idempotency_fingerprint FROM restaurant_orders WHERE session_id=? AND client_idempotency_key=?", (session["id"], idempotency_key)).fetchone()
+    if existing:
+        if existing["idempotency_fingerprint"] != fingerprint:
+            fail("Idempotency key was already used with a different order", 409)
+        return customer_order_view(c, existing["id"])
+    if c.execute("SELECT 1 FROM restaurant_orders WHERE session_id=? AND status!='closed' LIMIT 1", (session["id"],)).fetchone():
+        fail("This table already has an active order", 409)
+    menu_by_id = {}
+    for line in payload.lines:
+        item = c.execute("SELECT * FROM menu_items WHERE id=? AND active=1 AND category_id IN (SELECT id FROM menu_categories WHERE active=1)", (line.menu_item_id,)).fetchone()
+        if not item:
+            fail("Menu item not found or inactive", 404)
+        menu_by_id[line.menu_item_id] = item
+    stamp = now_iso()
+    order_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM restaurant_orders").fetchone()[0]
+    c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel,client_idempotency_key,idempotency_fingerprint) VALUES(?,?,?,'awaiting_payment',0,0,?,NULL,NULL,NULL,NULL,?,'qr',?,?)", (order_id, f"ORD-{order_id:04d}", session["id"], stamp, payload.customer_name, idempotency_key, fingerprint))
+    total = 0
+    for line in payload.lines:
+        item = menu_by_id[line.menu_item_id]
+        line_total = line.quantity * item["price"]
+        total += line_total
+        c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)", (order_id, item["id"], item["name"], line.quantity, item["price"], line_total))
+    c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=?", (total, total, order_id))
+    return customer_order_view(c, order_id)
 
 def create_ticket(c, order_id, stamp=None):
     existing = c.execute("SELECT * FROM kitchen_tickets WHERE order_id=?", (order_id,)).fetchone()
@@ -108,6 +249,51 @@ def tables():
 @app.get("/api/menu")
 def menu():
     with connect() as c: return rows(c, "SELECT m.*, c.code category_code, c.name category_name FROM menu_items m JOIN menu_categories c ON c.id=m.category_id WHERE m.active=1 AND c.active=1 ORDER BY c.id,m.id")
+
+@app.get("/api/customer/tables/{token}")
+def customer_table(token: str):
+    with connect() as c:
+        return customer_view(c, customer_session(c, token))
+
+@app.get("/api/customer/tables/{token}/menu")
+def customer_table_menu(token: str):
+    with connect() as c:
+        return customer_menu(c, customer_session(c, token))
+
+@app.post("/api/customer/tables/{token}/orders")
+def customer_order(token: str, payload: CustomerOrderIn, idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+    idempotency_key = normalize_idempotency_key(idempotency_key)
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        session = customer_session(c, token)
+        result = create_customer_order(c, session, payload, idempotency_key)
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError:
+        c.rollback()
+        fail("Could not create QR order", 409)
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+@app.get("/api/customer/tables/{token}/orders/{oid}")
+def customer_order_detail(token: str, oid: int):
+    with connect() as c:
+        session = customer_session(c, token)
+        order = c.execute(
+            "SELECT id FROM restaurant_orders WHERE id=? AND session_id=? AND order_channel='qr'",
+            (oid, session["id"]),
+        ).fetchone()
+        if not order:
+            fail("Order does not belong to this table session", 404)
+        return customer_order_view(c, oid)
+
 @app.get("/api/orders")
 def orders():
     with connect() as c:
@@ -135,8 +321,19 @@ def open_table(tid: int):
     try:
         c.execute("BEGIN IMMEDIATE"); t=get(c,"dining_tables",tid)
         if c.execute("SELECT 1 FROM table_sessions WHERE table_id=? AND status='open'",(tid,)).fetchone(): fail("Table already has an active session",409)
-        n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM table_sessions").fetchone()[0]; c.execute("UPDATE dining_tables SET status='occupied' WHERE id=?",(tid,)); c.execute("INSERT INTO table_sessions VALUES(?,?,?,'open',?,NULL)",(n,f"SES-{n:04d}",tid,now_iso())); c.commit(); return table_view(c,tid)
-    except (HTTPException,sqlite3.IntegrityError) as e: c.rollback(); fail(str(e),409)
+        n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM table_sessions").fetchone()[0]
+        stamp = now_iso()
+        qr_token = _customer_token()
+        c.execute("UPDATE dining_tables SET status='occupied' WHERE id=?",(tid,))
+        c.execute("INSERT INTO table_sessions(id,session_number,table_id,status,opened_at,closed_at,qr_token_hash,qr_token_issued_at) VALUES(?,?,?,'open',?,NULL,?,?)",(n,f"SES-{n:04d}",tid,stamp,_token_hash(qr_token),stamp))
+        c.commit()
+        return table_view(c,tid,qr_token)
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError:
+        c.rollback()
+        fail("Table could not be opened; please try again", 409)
     finally:c.close()
 @app.post("/api/sessions/{sid}/orders")
 def create_order(sid: int, x: OrderStartIn | None = None):
