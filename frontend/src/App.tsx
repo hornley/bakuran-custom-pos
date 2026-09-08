@@ -15,6 +15,8 @@ const steps: Array<[Step, string]> = [
   ["fulfillment", "Kitchen & pickup"],
 ];
 
+type ApiError = Error & { responseReceived?: boolean };
+
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
@@ -22,13 +24,17 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || body.message || "The request could not be completed.");
+  if (!response.ok) {
+    const error = new Error(body.detail || body.message || "The request could not be completed.") as ApiError;
+    error.responseReceived = true;
+    throw error;
+  }
   return body as T;
 }
 
 const money = (value: any) => `$${Number(value || 0).toFixed(2)}`;
 const label = (value: any) => String(value ?? "").replaceAll("_", " ");
-const operationKey = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const newOperationKey = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
@@ -76,6 +82,31 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [operationsWarehouse, setOperationsWarehouse] = useState(1);
   const secondaryRequest = useRef(0);
+  const pendingOperationKeys = useRef(new Map<string, string>());
+
+  function operationKey(operationId: string, prefix: string) {
+    const pending = pendingOperationKeys.current.get(operationId);
+    if (pending) return pending;
+    const key = newOperationKey(prefix);
+    pendingOperationKeys.current.set(operationId, key);
+    return key;
+  }
+
+  function clearOperationKey(operationId: string, key: string) {
+    if (pendingOperationKeys.current.get(operationId) === key) pendingOperationKeys.current.delete(operationId);
+  }
+
+  async function mutate<T>(operationId: string, prefix: string, path: string, method: string, payload: Row) {
+    const key = operationKey(operationId, prefix);
+    try {
+      const result = await api<T>(path, { method, body: JSON.stringify({ ...payload, idempotency_key: key }) });
+      clearOperationKey(operationId, key);
+      return result;
+    } catch (reason) {
+      if ((reason as ApiError)?.responseReceived) clearOperationKey(operationId, key);
+      throw reason;
+    }
+  }
 
   const categories = useMemo(
     () => Array.from(new Set(menu.map((item) => String(item.category_name || item.category || "Menu")))),
@@ -308,7 +339,7 @@ export default function App() {
     try {
       setBusy("inventory-adjustment");
       setError("");
-      await api("/api/stock/adjustment", { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("adjustment") }) });
+      await mutate("inventory-adjustment", "adjustment", "/api/stock/adjustment", "POST", values);
       setNotice("Stock adjustment saved.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -322,7 +353,7 @@ export default function App() {
     try {
       setBusy(`reorder-${values.product_id}`);
       setError("");
-      await api("/api/inventory/reorder-level", { method: "PUT", body: JSON.stringify({ ...values, idempotency_key: operationKey("reorder") }) });
+      await mutate(`reorder-${values.warehouse_id}-${values.product_id}`, "reorder", "/api/inventory/reorder-level", "PUT", values);
       setNotice("Reorder level saved.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -336,7 +367,7 @@ export default function App() {
     try {
       setBusy("purchase-create");
       setError("");
-      await api("/api/purchases", { method: "POST", body: JSON.stringify({ supplier_id: supplierId, idempotency_key: operationKey("purchase") }) });
+      await mutate("purchase-create", "purchase", "/api/purchases", "POST", { supplier_id: supplierId });
       setNotice("Draft purchase created.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -350,7 +381,7 @@ export default function App() {
     try {
       setBusy(`purchase-line-${purchaseId}`);
       setError("");
-      await api(`/api/purchases/${purchaseId}/lines`, { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("purchase-line") }) });
+      await mutate(`purchase-line-${purchaseId}`, "purchase-line", `/api/purchases/${purchaseId}/lines`, "POST", values);
       setNotice("Purchase line added.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -364,7 +395,7 @@ export default function App() {
     try {
       setBusy(`purchase-${action}-${purchaseId}`);
       setError("");
-      await api(`/api/purchases/${purchaseId}/${action}`, { method: "POST", body: JSON.stringify({ idempotency_key: operationKey(`purchase-${action}`) }) });
+      await mutate(`purchase-${action}-${purchaseId}`, `purchase-${action}`, `/api/purchases/${purchaseId}/${action}`, "POST", {});
       setNotice(action === "order" ? "Purchase ordered." : "Purchase closed.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -378,7 +409,7 @@ export default function App() {
     try {
       setBusy(`purchase-receive-${purchaseId}`);
       setError("");
-      await api(`/api/purchases/${purchaseId}/receive`, { method: "POST", body: JSON.stringify({ ...values, idempotency_key: operationKey("receipt") }) });
+      await mutate(`purchase-receive-${purchaseId}`, "receipt", `/api/purchases/${purchaseId}/receive`, "POST", values);
       setNotice("Receipt saved and inventory updated.");
       await loadSecondary("operations");
     } catch (reason) {

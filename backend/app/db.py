@@ -31,11 +31,11 @@ RESET_STATEMENTS = tuple(
     f"DROP TABLE IF EXISTS {table}"
     for table in (
         "receipts", "payments", "kitchen_tickets", "restaurant_order_lines",
-        "restaurant_orders", "table_sessions", "inventory", "menu_items",
-        "menu_categories", "dining_tables", "dining_areas", "notifications", "settings",
-        "attendance", "stock_movements", "purchase_lines", "purchases", "suppliers",
-        "customers", "catalog_items", "idempotency_keys", "audit_events", "auth_sessions", "auth_user_roles", "auth_roles", "auth_users",
-        "warehouses",
+        "purchase_lines", "stock_movements", "inventory", "restaurant_orders",
+        "purchases", "table_sessions", "menu_items", "menu_categories",
+        "dining_tables", "dining_areas", "suppliers", "customers", "catalog_items",
+        "idempotency_keys", "audit_events", "auth_sessions", "auth_user_roles", "auth_roles", "auth_users",
+        "warehouses", "notifications", "settings", "attendance",
         "schema_migrations",
     )
 )

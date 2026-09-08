@@ -30,6 +30,38 @@ def test_seed_module_exposes_documented_reset_cli(monkeypatch):
     runpy.run_module("app.seed", run_name="__main__")
     assert calls == [True]
 
+def test_reset_recreates_seed_after_inventory_purchase_and_audit_data(client):
+    adjustment = client.post(
+        "/api/stock/adjustment",
+        json={"product_id": 1, "warehouse_id": 1, "quantity": 1, "reason": "Reset regression", "idempotency_key": "reset-adjustment"},
+    )
+    assert adjustment.status_code == 200
+
+    purchase = client.post("/api/purchases", json={"supplier_id": 1, "idempotency_key": "reset-purchase"})
+    assert purchase.status_code == 200
+    purchase_id = purchase.json()["id"]
+    line = client.post(
+        f"/api/purchases/{purchase_id}/lines",
+        json={"product_id": 1, "warehouse_id": 1, "quantity": 2, "unit_cost": 8, "idempotency_key": "reset-line"},
+    )
+    assert line.status_code == 200
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM inventory WHERE product_id=1").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM purchase_lines WHERE purchase_id=?", (purchase_id,)).fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] >= 3
+
+    db.reset()
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT code FROM warehouses WHERE id=1").fetchone()[0] == "MAIN"
+        assert connection.execute("SELECT COUNT(*) FROM menu_items").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM inventory").fetchone()[0] == 4
+        assert connection.execute("SELECT COUNT(*) FROM purchases").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == 0
+        assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+
 def lifecycle(client):
     opened = client.post("/api/tables/2/open"); assert opened.status_code == 200
     session = opened.json()["session"]["id"]

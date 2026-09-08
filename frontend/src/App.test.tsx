@@ -198,4 +198,49 @@ describe("counter operational flows", () => {
     });
     await act(async () => root.unmount());
   });
+
+  it("reuses a receipt idempotency key when the response is lost before retry", async () => {
+    const purchase = {
+      id: 5,
+      purchase_number: "PUR-0005",
+      supplier_name: "Local Supply",
+      status: "ordered",
+      total: 80,
+      lines: [{ id: 9, product_id: 1, warehouse_id: 1, product_name: "Adobo", warehouse_code: "MAIN", received_quantity: 0, quantity: 10, unit_cost: 8 }],
+    };
+    const receiptRequests: Row[] = [];
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (options?.method === "POST" && url.endsWith("/api/purchases/5/receive")) {
+        receiptRequests.push(JSON.parse(String(options.body)));
+        if (receiptRequests.length === 1) return Promise.reject(new Error("Connection closed before the response"));
+        return response({ purchase, lines: purchase.lines });
+      }
+      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events")) return response([]);
+      if (url.includes("/api/inventory?warehouse_id=1")) return response({ products: [], movements: [] });
+      if (url.endsWith("/api/warehouses")) return response([{ id: 1, code: "MAIN", name: "Main Warehouse" }]);
+      if (url.endsWith("/api/purchases")) return response([purchase]);
+      if (url.endsWith("/api/catalog")) return response(menu.map((item) => ({ ...item, sku: "ADO-001", active: 1 })));
+      if (url.endsWith("/api/suppliers")) return response([{ id: 1, name: "Local Supply", active: 1 }]);
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => { button(container, "Operations").click(); });
+    await settle();
+    const receiptInput = container.querySelector<HTMLInputElement>('input[aria-label="Receive Adobo"]')!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setInputValue?.call(receiptInput, "3");
+      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button(container, "Receive selected").click());
+    await settle();
+    await act(async () => button(container, "Receive selected").click());
+    await settle();
+
+    expect(receiptRequests).toHaveLength(2);
+    expect(receiptRequests[0].idempotency_key).toMatch(/^receipt-/);
+    expect(receiptRequests[1].idempotency_key).toBe(receiptRequests[0].idempotency_key);
+    await act(async () => root.unmount());
+  });
 });
