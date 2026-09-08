@@ -12,7 +12,7 @@
 - Customer names, quantities, line counts, duplicate lines, and idempotency keys are bounded and validated before writes.
 - The create path runs in one `BEGIN IMMEDIATE` transaction, revalidates active menu/category state, snapshots current server prices, and creates an `awaiting_payment` QR order with no kitchen ticket.
 - A table session accepts at most one active QR order. Idempotent retries return the original order; a reused key with a changed name or basket returns `409`.
-- The React entrypoint selects `/qr/<token>` before the operator `AuthGate`, while all other paths continue to render the authenticated front-desk application.
+- The public customer API is intentionally unauthenticated only within the session-scoped `/api/customer/tables/{token}...` prefix; it does not grant access to operator endpoints. The React entrypoint selects `/qr/<token>` before the operator `AuthGate`, while all other paths continue to render the authenticated front-desk application.
 - The customer UI is responsive, supports active-menu browsing and a local basket, preserves input on API errors, and confirms the order number plus cash-payment handoff without implying kitchen release.
 
 ## Public contract
@@ -30,9 +30,9 @@ Invalid, closed, and cross-session tokens return `404`. Customer order responses
 
 ```bash
 ./test.sh
-backend/.venv/bin/python -m pytest -q backend/tests/test_qr_ordering.py
-cd frontend && npm test
-cd frontend && npm run build
+(cd backend && .venv/bin/python -m pytest -q tests/test_auth_boundary.py tests/test_qr_ordering.py)
+(cd frontend && npm test)
+(cd frontend && npm run build)
 git diff --check
 ```
 

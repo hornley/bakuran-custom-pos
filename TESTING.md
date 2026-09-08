@@ -11,12 +11,12 @@ Run the current checks from the repository root:
 The focused checks can be run directly:
 
 ```bash
-backend/.venv/bin/python -m pytest -q backend/tests/test_qr_ordering.py
-cd frontend && npm test
-cd frontend && npm run build
+(cd backend && .venv/bin/python -m pytest -q tests/test_auth_boundary.py tests/test_qr_ordering.py)
+(cd frontend && npm test)
+(cd frontend && npm run build)
 ```
 
-The backend pytest fixture creates a temporary SQLite database for each test. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
+The backend pytest fixtures create temporary SQLite databases for each test. The shared fixture sets `AUTH_LOCAL_DEV_BYPASS=true` to model an explicitly trusted local development instance; boundary tests unset it to verify the shipped default denial and separately cover local session/role/CSRF behavior. Never point tests at `backend/data/app.db`, and never run reset or mutation smoke tests against the main database.
 
 For a read-only service check when the app is already running:
 
@@ -56,6 +56,8 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 ## Customer QR ordering checks
 
 The QR backend tests cover session-scoped hashed tokens, invalid and closed tokens, cross-session isolation, active-menu filtering, bounded names and baskets, server-side price revalidation, one active QR order per session, transaction rollback, concurrent idempotent retries, payload conflicts, CORS preflight, and operator-auth boundaries.
+
+The auth boundary tests also verify that `/api/health` and `/api/auth/*` remain public in the shipped disabled profile, that explicit `AUTH_LOCAL_DEV_BYPASS=true` preserves the legacy open desk, and that `AUTH_PROFILE=local` with `AUTH_ENABLED=true` preserves login, role, and CSRF enforcement.
 
 The frontend tests cover the public route parser, token non-leakage, menu rendering, basket/name submission, idempotency headers, confirmation UI, safe closed-token errors, and recoverable API errors. The browser flow should be checked against an isolated temporary database; do not open a table or submit an order against `backend/data/app.db`.
 

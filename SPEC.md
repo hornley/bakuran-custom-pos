@@ -229,7 +229,7 @@ Orders support:
 - `Idempotency-Key` is required, trimmed, limited to 128 visible characters, and scoped to the table session. A retry with the same key and equivalent payload returns the original order. Reuse with a different name or basket returns `409`.
 - An open table session can have at most one active QR order. New submissions after the first QR order return `409`; retries remain safe and do not create another order.
 - QR orders are created as `awaiting_payment`, without a payment or kitchen ticket. Only the existing staff-recorded cash payment flow releases a paid order to the kitchen.
-- The public customer API is bearer-token based and does not bypass authentication on operator routes. CORS remains limited to configured frontend origins.
+- The public customer API is bearer-token based and does not bypass authentication on operator routes. With shipped `AUTH_PROFILE=disabled`, operator mutations require `401` unless `AUTH_LOCAL_DEV_BYPASS=true` is explicitly set for a trusted local development instance. For protected operation, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`; operator sessions, roles, and CSRF checks then apply. CORS remains limited to configured frontend origins.
 
 ## 7. Error and recovery behavior
 

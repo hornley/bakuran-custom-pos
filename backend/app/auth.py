@@ -36,6 +36,8 @@ DEFAULT_ALLOWED_ORIGINS = (
 )
 LOGIN_WINDOW_SECONDS = 60
 MAX_LOGIN_FAILURES = 5
+OPERATOR_MUTATION_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+_LOCAL_DEV_BYPASS_ENV = "AUTH_LOCAL_DEV_BYPASS"
 _LOGIN_FAILURES: dict[str, list[float]] = {}
 
 
@@ -112,6 +114,20 @@ def auth_enabled() -> bool:
     return AUTH_PROFILE == "local" and os.getenv("AUTH_ENABLED", "false").lower() not in {"0", "false", "no", "off"}
 
 
+def local_dev_bypass_enabled() -> bool:
+    """Allow the legacy open operator desk only with an explicit local opt-in."""
+    return AUTH_PROFILE == "disabled" and _env_bool(_LOCAL_DEV_BYPASS_ENV)
+
+
+def operator_auth_required(request: Request) -> bool:
+    return (
+        request.url.path.startswith("/api/")
+        and request.method.upper() in OPERATOR_MUTATION_METHODS
+        and not request.url.path.startswith(PUBLIC_PREFIXES)
+        and not local_dev_bypass_enabled()
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -165,9 +181,21 @@ def record_event(actor_user_id: int | None, event_type: str, path: str = "", det
 
 
 def initialize_auth() -> None:
-    if not auth_enabled():
-        return
     with connect() as connection:
+        if not auth_enabled():
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    actor_user_id INTEGER,
+                    event_type TEXT NOT NULL,
+                    path TEXT NOT NULL DEFAULT '',
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            return
         connection.executescript(AUTH_SCHEMA)
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(auth_sessions)").fetchall()}
         if "csrf_hash" not in columns:
@@ -281,12 +309,26 @@ def _role_allows(user: dict[str, Any], request: Request) -> bool:
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        if not auth_enabled() or not request.url.path.startswith("/api/"):
+        if not request.url.path.startswith("/api/"):
             return await call_next(request)
         if request.url.path in PUBLIC_PATHS or request.url.path.startswith(PUBLIC_PREFIXES) or request.method.upper() == "OPTIONS":
-            if request.url.path == "/api/auth/logout" and request.method.upper() not in {"GET", "HEAD"} and request.cookies.get("local_session") and not _csrf_valid(request):
+            if auth_enabled() and request.url.path == "/api/auth/logout" and request.method.upper() not in {"GET", "HEAD"} and request.cookies.get("local_session") and not _csrf_valid(request):
                 record_event(None, "auth.csrf_denied", request.url.path, "CSRF validation failed")
                 return JSONResponse({"detail": "CSRF validation failed."}, status_code=403)
+            return await call_next(request)
+        if not auth_enabled():
+            if operator_auth_required(request):
+                record_event(None, "auth.denied", request.url.path, "Operator authentication is required")
+                return JSONResponse(
+                    {
+                        "detail": (
+                            "Operator authentication is required for mutations. Enable local auth with "
+                            "AUTH_PROFILE=local and AUTH_ENABLED=true, or set AUTH_LOCAL_DEV_BYPASS=true "
+                            "only for a trusted local development instance."
+                        )
+                    },
+                    status_code=401,
+                )
             return await call_next(request)
         user = current_user(request)
         if user is None:

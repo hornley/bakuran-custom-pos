@@ -113,7 +113,7 @@ Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bo
 
 ## Authentication
 
-The current manifest uses `auth_profile: disabled`, so the desk opens directly. The generated backend retains the local authentication and CSRF modules for an opt-in local-auth variant. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
+The current manifest uses `auth_profile: disabled`, but operator mutations are still denied by default. Set `AUTH_LOCAL_DEV_BYPASS=true` only for a trusted local development instance that intentionally uses the legacy open desk. For protected operator access, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`, then configure `AUTH_BOOTSTRAP_USERNAME` and `AUTH_BOOTSTRAP_PASSWORD` on first startup. In local auth mode, operator reads and mutations require a session, mutations also require the CSRF token, and role checks remain active. `GET /api/health` and `/api/auth/login`, `/api/auth/logout`, and `/api/auth/session` remain public; customer bearer tokens do not grant operator access. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
 
 Customer QR endpoints are intentionally public bearer-token routes. They do not grant access to operator endpoints, and the customer frontend omits operator cookies. QR tokens are session-scoped and stored only as hashes.
 
