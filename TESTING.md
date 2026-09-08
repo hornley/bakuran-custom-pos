@@ -47,7 +47,7 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 
 ## Current validation baseline
 
-- Backend tests: `43 passed` including tax rounding/configuration, snapshots, auth, reset compatibility, and Phase 3 lifecycle regressions
+- Backend tests: `45 passed` including tax rounding/configuration, snapshots, auth, reset compatibility, Phase 3 lifecycle regressions, and bounded-magnitude no-mutation regressions
 - Payment-gate regression: served-order payment rejection returns HTTP 409 and preserves order/payment/ticket state
 - Ready/pickup regression: ready and served tickets remain visible until order close
 - Frontend tests: `5 passed` in 1 Vitest file
@@ -63,6 +63,12 @@ The backend regression suite also checks duplicate and concurrent payment/releas
 cd backend
 .venv/bin/python -m pytest -q tests/test_tax_math.py tests/test_tax_configuration.py tests/test_tax_auth.py
 ```
+
+The focused tax command currently reports `28 passed`. It also verifies that
+`1e1000` payment amounts and `10**100` line quantities return HTTP 422 without
+changing order, payment, kitchen-ticket, or order-line state. Monetary values
+are bounded to `9999999999.99`; each order-line quantity is bounded to
+`999999999` before Decimal totals are calculated.
 
 The default fixture uses the checked-in unauthenticated local deployment contract.
 The auth test explicitly opts into `AUTH_PROFILE=local`/`AUTH_ENABLED=true` with

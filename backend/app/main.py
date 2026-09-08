@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, ROUND_HALF_UP
 import sqlite3
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,10 @@ try:
     from .generated_metadata import EXPORT_STATUS, FRONTEND_TEMPLATE, PROJECT_NAME, TARGET_STACK
 except ImportError:
     PROJECT_NAME, TARGET_STACK, FRONTEND_TEMPLATE, EXPORT_STATUS = "Restaurant Management", "react_fastapi_sqlite", "operational_desk", "generated"
+
+CENT = Decimal("0.01")
+MAX_MONEY = Decimal("9999999999.99")
+MAX_ORDER_QUANTITY = 999_999_999
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -32,7 +36,7 @@ app.include_router(auth_router)
 
 class LineIn(BaseModel):
     menu_item_id: int
-    quantity: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=MAX_ORDER_QUANTITY)
 class PaymentIn(BaseModel):
     amount: Decimal = Field(gt=0)
     method: str
@@ -42,8 +46,14 @@ class PaymentIn(BaseModel):
     def amount_valid(cls, value):
         if not value.is_finite():
             raise ValueError("amount must be a finite decimal")
+        if value > MAX_MONEY:
+            raise ValueError("amount is outside the supported monetary range")
         if value.as_tuple().exponent < -2:
             raise ValueError("amount must have at most two decimal places")
+        try:
+            value.quantize(CENT, rounding=ROUND_HALF_UP)
+        except DecimalException as exc:
+            raise ValueError("amount is outside the supported monetary range") from exc
         return value
 
     @field_validator("method")
@@ -95,9 +105,27 @@ def rows(c, sql, params=()): return [dict(x) for x in c.execute(sql, params).fet
 def fail(message, status=400): raise HTTPException(status_code=status, detail=message)
 
 
+def quantize_money(value, label: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 0 or parsed > MAX_MONEY:
+            raise ValueError
+        return parsed.quantize(CENT, rounding=ROUND_HALF_UP)
+    except (DecimalException, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{label} is outside the supported monetary range") from exc
+
+
+def calculate_line_total(unit_price, quantity: int) -> Decimal:
+    try:
+        raw_total = Decimal(str(unit_price)) * quantity
+    except (DecimalException, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Order line total is outside the supported monetary range") from exc
+    return quantize_money(raw_total, "Order line total")
+
+
 def order_subtotal(c, order_id: int) -> Decimal:
     values = c.execute("SELECT line_total FROM restaurant_order_lines WHERE order_id=?", (order_id,)).fetchall()
-    return sum((Decimal(str(row["line_total"])) for row in values), Decimal("0.00")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return quantize_money(sum((Decimal(str(row["line_total"])) for row in values), Decimal("0.00")), "Order total")
 
 
 def get(c, table, ident):
@@ -306,10 +334,11 @@ def add_line(oid:int,x:LineIn):
         item=c.execute("SELECT * FROM menu_items WHERE id=? AND active=1",(x.menu_item_id,)).fetchone()
         if not item: fail("Menu item not found or inactive",404)
         old=c.execute("SELECT quantity FROM restaurant_order_lines WHERE order_id=? AND menu_item_id=?",(oid,x.menu_item_id)).fetchone(); new_qty=x.quantity+(old[0] if old else 0)
-        line_total = (Decimal(str(item["price"])) * new_qty).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
+        if new_qty > MAX_ORDER_QUANTITY:
+            fail("Order line quantity is outside the supported range", 422)
+        line_total = calculate_line_total(item["price"], new_qty)
         if old: c.execute("UPDATE restaurant_order_lines SET quantity=?,line_total=? WHERE order_id=? AND menu_item_id=?",(new_qty,str(line_total),oid,x.menu_item_id))
         else:
-            line_total = (Decimal(str(item["price"])) * x.quantity).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP")
             c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)",(oid,x.menu_item_id,item["name"],x.quantity,item["price"],str(line_total)))
         total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
@@ -362,14 +391,12 @@ def pay(oid:int,x:PaymentIn):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]=="paid":
             existing = c.execute("SELECT amount FROM payments WHERE order_id=?", (oid,)).fetchone()
-            if existing and Decimal(str(existing["amount"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP) != x.amount:
+            if existing and quantize_money(existing["amount"], "Stored payment amount") != quantize_money(x.amount, "Payment amount"):
                 fail("Payment amount must equal order total", 409)
             c.commit(); return order_view(c, oid)
         if o["status"] != "awaiting_payment": fail("Order must be awaiting payment before payment",409)
-        amount = x.amount
-        if amount.quantize(Decimal("0.01")) != amount:
-            fail("Payment amount must have at most two decimal places", 422)
-        if amount != Decimal(str(o["total"])).quantize(Decimal("0.01"), rounding="ROUND_HALF_UP"):
+        amount = quantize_money(x.amount, "Payment amount")
+        if amount != quantize_money(o["total"], "Order total"):
             fail("Payment amount must equal order total",409)
         stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments(id,payment_number,order_id,amount,method,status,paid_at) VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,str(amount),x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
         if o["status"] == "awaiting_payment":

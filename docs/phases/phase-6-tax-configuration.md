@@ -57,8 +57,8 @@ The current deployment remains single-store; tenant isolation is not being claim
 
 To be recorded before handoff:
 
-- focused tax backend tests (`26 passed`);
-- full `./test.sh` with isolated temporary databases (`43 passed`);
+- focused tax backend tests (`28 passed`);
+- full `./test.sh` with isolated temporary databases (`45 passed`);
 - frontend tests (`5 passed`), TypeScript/Vite production build;
 - `git diff --check`;
 - independent exact-SHA reviewer verdict and GitHub review URL.

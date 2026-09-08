@@ -274,6 +274,42 @@ def test_payment_float_payload_keeps_existing_api_contract_with_decimal_validati
     assert Decimal(str(response.json()["payment"]["amount"])) == Decimal("19.80")
 
 
+def test_payment_huge_magnitude_is_rejected_without_mutation(client):
+    order_id = start_order(client)
+    assert confirm(client, order_id).status_code == 200
+    before = client.get(f"/api/orders/{order_id}").json()
+
+    response = client.post(
+        f"/api/orders/{order_id}/pay",
+        json={"amount": "1e1000", "method": "cash"},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/api/orders/{order_id}").json() == before
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM payments WHERE order_id=?", (order_id,)).fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM kitchen_tickets WHERE order_id=?", (order_id,)).fetchone()[0] == 0
+
+
+def test_line_huge_quantity_is_rejected_without_mutation(client):
+    created = client.post("/api/counter/orders")
+    assert created.status_code == 200
+    order_id = created.json()["order"]["id"]
+    before = client.get(f"/api/orders/{order_id}").json()
+
+    response = client.post(
+        f"/api/orders/{order_id}/lines",
+        json={"menu_item_id": 1, "quantity": 10**100},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/api/orders/{order_id}").json() == before
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM restaurant_order_lines WHERE order_id=?", (order_id,)).fetchone()[0] == 0
+        order = connection.execute("SELECT subtotal, total FROM restaurant_orders WHERE id=?", (order_id,)).fetchone()
+        assert (order["subtotal"], order["total"]) == (0, 0)
+
+
 def test_legacy_paid_order_without_tax_snapshot_keeps_zero_tax_when_rule_is_added_later(client):
     order_id = start_order(client)
     with db.connect() as connection:
