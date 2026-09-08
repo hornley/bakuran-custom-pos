@@ -17,11 +17,17 @@ REQUIRED_TABLES = frozenset(
         "kitchen_tickets",
         "payments",
         "receipts",
+        "audit_events",
+        "delivery_drivers",
+        "delivery_orders",
+        "delivery_assignments",
+        "delivery_idempotency_keys",
     }
 )
 RESET_STATEMENTS = tuple(
     f"DROP TABLE IF EXISTS {table}"
     for table in (
+        "delivery_idempotency_keys", "delivery_assignments", "delivery_orders", "delivery_drivers",
         "receipts", "payments", "kitchen_tickets", "restaurant_order_lines",
         "restaurant_orders", "table_sessions", "inventory", "menu_items",
         "menu_categories", "dining_tables", "dining_areas", "notifications", "settings",

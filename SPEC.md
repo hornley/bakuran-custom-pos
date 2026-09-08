@@ -10,6 +10,8 @@
 
 Bakuran POS is a counter-first restaurant point-of-sale system for taking customer orders, collecting cash, sending paid orders to the kitchen, calling customers for pickup, and issuing sales receipts.
 
+The current delivery slice extends the counter workflow with validated delivery metadata, staffed driver assignment, and local dispatch tracking. Delivery orders remain cash-only and do not call an external courier service.
+
 The primary operating model is:
 
 ```text
@@ -22,10 +24,11 @@ Choose order type
   -> Close order and issue receipt
 ```
 
-The system supports two connected front-desk entry paths:
+The system supports three connected front-desk entry paths:
 
 1. **New order:** staff takes the customer's order manually.
 2. **QR orders:** staff selects and pays an order already submitted by a customer's QR ordering flow.
+3. **Delivery order:** staff takes a counter order, records its address and contact details, then dispatches it from the secondary delivery board.
 
 There is no payment gateway. Payments are recorded by front-desk staff as cash transactions.
 
@@ -39,6 +42,8 @@ There is no payment gateway. Payments are recorded by front-desk staff as cash t
 - Keep QR orders connected to the front desk without requiring scanning or manual order-number typing.
 - Keep operational reference views secondary to order entry.
 - Do not introduce inventory or purchasing work into the POS flow.
+- Require delivery address and contact metadata before confirmation or payment.
+- Keep delivery status changes transaction-safe and replay-safe when callbacks or staff retries repeat.
 
 ## 3. User roles
 
@@ -54,6 +59,13 @@ Front-desk staff can:
 - Send paid orders into kitchen fulfillment.
 - Advance kitchen and pickup status.
 - Close completed orders and issue receipts.
+- Create delivery-channel counter orders and record a validated address, contact number, and optional contact name.
+- Assign and reassign active delivery drivers from the secondary delivery board.
+- Advance paid deliveries through dispatch, delivery, failure, or cancellation paths.
+
+### Delivery driver
+
+Drivers are represented as active/inactive operational records with a code, display name, and contact number. This slice does not provide driver login, a driver-facing application, GPS tracking, or external courier integration.
 
 ### Kitchen staff
 
@@ -83,6 +95,8 @@ It must not preload:
 - Dashboard metrics.
 - Kitchen history.
 - Inventory or purchasing data.
+
+Delivery is opened through a secondary `Delivery` route and is not preloaded on the compact first screen.
 
 ### 4.2 Manual order flow
 
@@ -159,6 +173,26 @@ The QR payment queue:
 - Preserves the original order number after payment.
 - Uses `Back to QR orders` to return to the queue.
 
+### 4.5 Delivery order flow
+
+```text
+Delivery order
+  -> Build basket
+  -> Save address/contact metadata
+  -> Confirm customer
+  -> Collect cash
+  -> Pending dispatch
+  -> Assign or reassign driver
+  -> Out for delivery
+  -> Delivered
+```
+
+Delivery metadata is stored against exactly one restaurant order and is never inferred from another order. Address and contact are required; contact name is optional but length-validated. Invalid metadata is rejected before a delivery record is created or changed.
+
+The secondary delivery board shows pending, assigned, out-for-delivery, delivered, failed, and cancelled records. It shows each order's own address/contact, active driver, and assignment history. Staff may fail or cancel a paid delivery with a reason. A failed or cancelled delivery cannot be assigned or delivered afterward.
+
+Callbacks may report `out_for_delivery`, `delivered`, `failed`, or `cancelled` with a required callback identifier. Repeated callback identifiers replay the original response; reusing one for a different payload is rejected.
+
 ## 5. Order lifecycle
 
 The payment gate controls kitchen eligibility:
@@ -181,6 +215,19 @@ Rules:
 - A paid order receives or activates a queued kitchen ticket.
 - Kitchen transitions must follow the valid sequence.
 - Closing an eligible completed order issues a sales receipt.
+
+For delivery orders, payment is a hard boundary for dispatch as well:
+
+```text
+open
+  -> awaiting_payment
+  -> paid + delivery pending
+  -> assigned
+  -> out_for_delivery
+  -> delivered | failed | cancelled
+```
+
+Delivery orders accept cash only. Assignment and all dispatch transitions require a paid order and its payment record. The delivery status is independent from the restaurant kitchen ticket so the existing payment gate and kitchen workflow remain intact.
 
 ## 6. Public API contracts
 
@@ -208,6 +255,17 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `GET /api/customer/tables/{token}/menu` | Public active menu for a table session |
 | `POST /api/customer/tables/{token}/orders` | Public QR order submission; requires `Idempotency-Key` |
 | `GET /api/customer/tables/{token}/orders/{order_id}` | Public QR order status scoped to the same token/session |
+| `POST /api/orders/{order_id}/delivery` | Validate and save delivery address/contact metadata |
+| `GET /api/delivery` | List delivery board records, optionally filtered by status |
+| `GET /api/delivery/drivers` | List active delivery drivers |
+| `GET /api/delivery/{delivery_id}` | Load one delivery with driver and assignment history |
+| `POST /api/delivery/{delivery_id}/assign` | Assign or reassign an active driver |
+| `POST /api/delivery/{delivery_id}/out-for-delivery` | Guarded dispatch transition |
+| `POST /api/delivery/{delivery_id}/delivered` | Guarded delivery completion transition |
+| `POST /api/delivery/{delivery_id}/failed` | Record a failed delivery with a reason |
+| `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
+| `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
+| `GET /api/audit-events` | Review audit events for delivery and auth actions |
 
 ### Order metadata
 
@@ -215,10 +273,11 @@ Orders support:
 
 - `order_number`
 - `customer_name`
-- `order_channel`, including `counter` and `qr`
+- `order_channel`, including `counter`, `qr`, and `delivery`
 - Optional `table_id` and table context
 - Payment state
 - Kitchen eligibility and ticket state
+- For `order_channel=delivery`: delivery address, contact, optional contact name, dispatch status, driver, and assignment history
 
 ### Customer QR contract
 
@@ -242,6 +301,9 @@ Orders support:
 - Back navigation is non-destructive.
 - Invalid kitchen transitions return a conflict response.
 - Premature kitchen release and invalid payment attempts must not mutate order state.
+- Delivery metadata, assignment, transition, and callback validation failures do not mutate delivery state.
+- Repeated idempotent delivery requests replay the original response; conflicting reuse of an idempotency key returns a conflict.
+- Delivery mutations are logged as audit events without writing address or contact data into the event detail.
 - Cancellation, voids, refunds, and destructive resets are outside the current POS scope.
 
 ## 8. Non-goals
@@ -252,9 +314,10 @@ The current POS does not include:
 - Inventory management or stock mutation.
 - Purchasing or supplier workflows.
 - Order cancellation, voids, or refunds.
-- Staff accounts, permissions, or attendance management.
+- Staff accounts, permissions, or attendance management beyond the existing optional local-auth boundary.
 - Automatic customer notifications.
-- Delivery or table-service settlement workflows.
+- External courier, driver, GPS, route-optimization, webhook, or online-delivery integration.
+- Delivery refunds, cash-on-delivery collection, or settlement workflows.
 - Multi-store or multi-location synchronization; the QR route and payment queue use the single local SQLite store.
 
 ## 9. Acceptance criteria
@@ -292,6 +355,17 @@ The current POS does not include:
 5. A retry with the same idempotency key returns the same order, while a changed payload is rejected.
 6. Staff selects the order from the unpaid QR queue and records cash before kitchen preparation begins.
 
+### Delivery
+
+1. Staff creates a `delivery` counter order and adds menu lines.
+2. Missing or invalid address/contact metadata is rejected without creating or changing a delivery record.
+3. Confirmation and payment are blocked until metadata exists; non-cash delivery payment is rejected.
+4. A paid delivery appears as `pending` on the secondary delivery board.
+5. Staff assigns and can reassign only active drivers; assignment history keeps the previous driver.
+6. Invalid transitions preserve the exact delivery and assignment state.
+7. Delivery callbacks and staff retries are idempotent and do not duplicate assignment or audit records.
+8. The board supports delivered, failed, and cancelled terminal outcomes and displays the order's own metadata only.
+
 ### System validation
 
 - Backend integration tests pass.
@@ -300,6 +374,8 @@ The current POS does not include:
 - Unpaid orders remain out of the kitchen.
 - Invalid actions return a conflict and preserve state.
 - Sales receipts are issued only through the close flow.
+- Delivery status changes require payment, follow the guarded state graph, and emit audit events.
+- No external courier service is called by this implementation.
 
 ## 10. Local development
 
