@@ -8,6 +8,9 @@ from app import auth, db
 from app.main import app
 
 
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+
 def stock(client, product_id=1, warehouse_id=1):
     response = client.get(f"/api/inventory?warehouse_id={warehouse_id}")
     assert response.status_code == 200
@@ -276,6 +279,103 @@ def test_purchase_total_rejects_finite_sum_overflow_before_mutation(client):
         assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
         assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
         assert connection.execute("SELECT 1 FROM idempotency_keys WHERE key='large-cost-2'").fetchone() is None
+
+
+def test_stock_adjustment_rejects_quantity_outside_supported_bound_before_mutation(client):
+    with db.connect() as connection:
+        before = {
+            "on_hand": connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0],
+            "movements": connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    for quantity in (SQLITE_INTEGER_MAX, SQLITE_INTEGER_MAX + 1, -(SQLITE_INTEGER_MAX + 1)):
+        rejected = client.post(
+            "/api/stock/adjustment",
+            json={"product_id": 1, "quantity": quantity, "reason": "Boundary test", "idempotency_key": f"boundary-{quantity}"},
+        )
+        assert rejected.status_code == 422
+        assert "supported" in str(rejected.json()["detail"])
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0] == before["on_hand"]
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == before["movements"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+
+
+def test_stock_adjustment_rejects_result_outside_sqlite_integer_range_before_mutation(client):
+    with db.connect() as connection:
+        connection.execute("UPDATE inventory SET on_hand=? WHERE product_id=1 AND warehouse_id=1", (SQLITE_INTEGER_MAX - 1,))
+        before = {
+            "movements": connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        "/api/stock/adjustment",
+        json={"product_id": 1, "quantity": 2, "reason": "Overflow test", "idempotency_key": "adjustment-overflow"},
+    )
+    assert rejected.status_code == 422
+    assert "supported" in str(rejected.json()["detail"])
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0] == SQLITE_INTEGER_MAX - 1
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == before["movements"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+
+
+def test_purchase_receipt_rejects_extreme_quantity_before_mutation(client):
+    pid = create_purchase(client, quantity=3)
+    assert client.post(f"/api/purchases/{pid}/order").status_code == 200
+    with db.connect() as connection:
+        before = {
+            "on_hand": connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0],
+            "received": connection.execute("SELECT received_quantity FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0],
+            "movements": connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        f"/api/purchases/{pid}/receive",
+        json={"lines": [{"product_id": 1, "quantity": SQLITE_INTEGER_MAX + 1}], "idempotency_key": "receipt-overflow"},
+    )
+    assert rejected.status_code == 422
+    assert "supported" in str(rejected.json()["detail"])
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0] == before["on_hand"]
+        assert connection.execute("SELECT received_quantity FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0] == before["received"]
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == before["movements"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
+
+
+def test_legacy_stock_receipt_rejects_extreme_quantity_before_mutation(client):
+    with db.connect() as connection:
+        before = {
+            "on_hand": connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0],
+            "movements": connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0],
+            "audit": connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0],
+            "idempotency": connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0],
+        }
+
+    rejected = client.post(
+        "/api/stock/receipt",
+        json={"name": "legacy overflow", "product_id": 1, "quantity": SQLITE_INTEGER_MAX + 1, "idempotency_key": "legacy-overflow"},
+    )
+    assert rejected.status_code == 422
+    assert "supported" in str(rejected.json()["detail"])
+
+    with db.connect() as connection:
+        assert connection.execute("SELECT on_hand FROM inventory WHERE product_id=1 AND warehouse_id=1").fetchone()[0] == before["on_hand"]
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == before["movements"]
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before["audit"]
+        assert connection.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == before["idempotency"]
 
 
 def test_purchase_line_accepts_zero_and_decimal_costs_with_idempotent_replay(client):

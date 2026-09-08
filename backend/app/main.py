@@ -12,6 +12,59 @@ from pydantic import BaseModel, Field, field_validator
 from .db import REQUIRED_TABLES, connect, initialize
 from .auth import AUTH_ALLOWED_ORIGINS, AuthMiddleware, initialize_auth, router as auth_router
 
+# Inventory is counted in whole units. This practical application bound keeps
+# every persisted stock quantity well below SQLite's signed INTEGER limit while
+# still leaving ample room for normal restaurant inventory.
+MAX_INVENTORY_QUANTITY = 1_000_000_000
+SQLITE_INTEGER_MIN = -(2**63)
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+
+def _validate_quantity_bound(value, *, field_name, minimum):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > MAX_INVENTORY_QUANTITY:
+        raise ValueError(
+            f"{field_name} must be within the supported inventory quantity bound "
+            f"({minimum}..{MAX_INVENTORY_QUANTITY})"
+        )
+    return value
+
+
+def _validate_signed_quantity_bound(value, *, field_name):
+    if isinstance(value, bool) or not isinstance(value, int) or value < -MAX_INVENTORY_QUANTITY or value > MAX_INVENTORY_QUANTITY:
+        raise ValueError(
+            f"{field_name} must be within the supported inventory quantity bound "
+            f"(-{MAX_INVENTORY_QUANTITY}..{MAX_INVENTORY_QUANTITY})"
+        )
+    return value
+
+
+def _stored_quantity(value, *, field_name, minimum):
+    if isinstance(value, bool) or not isinstance(value, int):
+        fail(f"{field_name} is outside the supported inventory quantity range", 422)
+    if value < minimum or value > MAX_INVENTORY_QUANTITY:
+        fail(f"{field_name} is outside the supported inventory quantity range", 422)
+    return value
+
+
+def _checked_quantity_sum(first, second, *, field_name):
+    first = _stored_quantity(first, field_name=field_name, minimum=0)
+    if isinstance(second, bool) or not isinstance(second, int):
+        fail(f"{field_name} is outside the supported inventory quantity range", 422)
+    result = first + second
+    if result > MAX_INVENTORY_QUANTITY or result > SQLITE_INTEGER_MAX or result < SQLITE_INTEGER_MIN:
+        fail(f"{field_name} exceeds the supported inventory quantity range", 422)
+    return result
+
+
+def _checked_inventory_result(current, delta, *, field_name="Inventory quantity"):
+    current = _stored_quantity(current, field_name="Current inventory quantity", minimum=0)
+    if isinstance(delta, bool) or not isinstance(delta, int):
+        fail(f"{field_name} exceeds the supported inventory quantity range", 422)
+    result = current + delta
+    if result > MAX_INVENTORY_QUANTITY or result > SQLITE_INTEGER_MAX or result < SQLITE_INTEGER_MIN:
+        fail(f"{field_name} exceeds the supported inventory quantity range", 422)
+    return result
+
 try:
     from .generated_metadata import EXPORT_STATUS, FRONTEND_TEMPLATE, PROJECT_NAME, TARGET_STACK
 except ImportError:
@@ -299,6 +352,11 @@ class GenericIn(BaseModel):
     unit_cost: float = Field(default=0, ge=0)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
 
+    @field_validator("quantity")
+    @classmethod
+    def quantity_valid(cls, value):
+        return _validate_quantity_bound(value, field_name="quantity", minimum=1)
+
     @field_validator("idempotency_key", mode="before")
     @classmethod
     def idempotency_key_valid(cls, value):
@@ -347,6 +405,11 @@ class StockAdjustmentIn(BaseModel):
     reason: str = Field(min_length=1, max_length=240)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
 
+    @field_validator("quantity")
+    @classmethod
+    def quantity_valid(cls, value):
+        return _validate_signed_quantity_bound(value, field_name="quantity")
+
     @field_validator("reason", mode="before")
     @classmethod
     def reason_valid(cls, value):
@@ -377,6 +440,11 @@ class PurchaseLineIn(BaseModel):
     unit_cost: float = Field(ge=0, allow_inf_nan=False)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
 
+    @field_validator("quantity")
+    @classmethod
+    def quantity_valid(cls, value):
+        return _validate_quantity_bound(value, field_name="quantity", minimum=1)
+
     @field_validator("unit_cost", mode="before")
     @classmethod
     def unit_cost_valid(cls, value):
@@ -403,6 +471,11 @@ class PurchaseReceiptLineIn(BaseModel):
     product_id: int = Field(gt=0)
     warehouse_id: int = Field(default=1, gt=0)
     quantity: int = Field(gt=0)
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_valid(cls, value):
+        return _validate_quantity_bound(value, field_name="quantity", minimum=1)
 
 
 class PurchaseReceiptIn(BaseModel):
@@ -439,6 +512,11 @@ class ReorderLevelIn(BaseModel):
     warehouse_id: int = Field(default=1, gt=0)
     reorder_level: int = Field(ge=0)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("reorder_level")
+    @classmethod
+    def reorder_level_valid(cls, value):
+        return _validate_quantity_bound(value, field_name="reorder_level", minimum=0)
 
     @field_validator("idempotency_key", mode="before")
     @classmethod
@@ -756,12 +834,13 @@ def stock_adjustment(x: StockAdjustmentIn, request: Request):
         _active_product(c, x.product_id)
         _active_warehouse(c, x.warehouse_id)
         current = _ensure_inventory_row(c, x.product_id, x.warehouse_id)
-        if current["on_hand"] + x.quantity < current["reserved"]:
+        next_on_hand = _checked_inventory_result(current["on_hand"], x.quantity, field_name="Inventory adjustment")
+        if next_on_hand < current["reserved"]:
             fail("Adjustment cannot reduce stock below reserved quantity", 409)
         stamp = now_iso()
         c.execute(
-            "UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?",
-            (x.quantity, stamp, x.product_id, x.warehouse_id),
+            "UPDATE inventory SET on_hand=?,updated_at=? WHERE product_id=? AND warehouse_id=?",
+            (next_on_hand, stamp, x.product_id, x.warehouse_id),
         )
         movement = c.execute(
             "INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -1009,7 +1088,9 @@ def receive_purchase(pid: int, request: Request, x: PurchaseReceiptIn | None = B
             _active_product(c, receipt_line.product_id)
             _active_warehouse(c, receipt_line.warehouse_id)
             key = (receipt_line.product_id, receipt_line.warehouse_id)
-            requested[key] = requested.get(key, 0) + receipt_line.quantity
+            requested[key] = _checked_quantity_sum(
+                requested.get(key, 0), receipt_line.quantity, field_name="Receipt quantity"
+            )
         purchase_lines = {}
         for line in c.execute("SELECT * FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchall():
             purchase_lines[(line["product_id"], line["warehouse_id"])] = line
@@ -1019,13 +1100,25 @@ def receive_purchase(pid: int, request: Request, x: PurchaseReceiptIn | None = B
             fail("Receipt contains a product or warehouse not on this purchase", 409)
         for key, quantity in requested.items():
             line = purchase_lines[key]
-            if not x.allow_over_receipt and line["received_quantity"] + quantity > line["quantity"]:
+            next_received = _checked_quantity_sum(
+                line["received_quantity"], quantity, field_name="Received quantity"
+            )
+            next_on_hand = _checked_quantity_sum(
+                _ensure_inventory_row(c, line["product_id"], line["warehouse_id"])["on_hand"],
+                quantity,
+                field_name="Inventory quantity",
+            )
+            if not x.allow_over_receipt and next_received > line["quantity"]:
                 fail("Receipt exceeds ordered quantity", 409)
+            if next_on_hand > MAX_INVENTORY_QUANTITY:
+                fail("Inventory quantity exceeds the supported inventory quantity range", 422)
         stamp = now_iso()
         for (product_id, warehouse_id), quantity in requested.items():
             line = purchase_lines[(product_id, warehouse_id)]
-            _ensure_inventory_row(c, product_id, warehouse_id, stamp)
-            c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?", (quantity, stamp, product_id, warehouse_id))
+            c.execute(
+                "UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?",
+                (quantity, stamp, product_id, warehouse_id),
+            )
             c.execute("UPDATE purchase_lines SET received_quantity=received_quantity+? WHERE id=?", (quantity, line["id"]))
             c.execute("INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)", (product_id, warehouse_id, "receipt", quantity, p["purchase_number"], x.override_reason or "Purchase receipt", x.idempotency_key, stamp))
         remaining = c.execute(
@@ -1126,9 +1219,10 @@ def stock_receipt(x: GenericIn, request: Request):
             return existing
         _active_product(c, product_id)
         _active_warehouse(c, warehouse_id)
+        current = _ensure_inventory_row(c, product_id, warehouse_id)
+        next_on_hand = _checked_inventory_result(current["on_hand"], x.quantity, field_name="Inventory quantity")
         stamp = now_iso()
-        _ensure_inventory_row(c, product_id, warehouse_id, stamp)
-        c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?", (x.quantity, stamp, product_id, warehouse_id))
+        c.execute("UPDATE inventory SET on_hand=?,updated_at=? WHERE product_id=? AND warehouse_id=?", (next_on_hand, stamp, product_id, warehouse_id))
         c.execute(
             "INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
             (product_id, warehouse_id, "receipt", x.quantity, x.value or "manual", "Legacy stock receipt", x.idempotency_key, stamp),

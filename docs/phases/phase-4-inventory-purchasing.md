@@ -26,9 +26,9 @@ This is a single-store implementation. Warehouses scope stock inside one store; 
 
 ## Verification
 
-- Focused inventory/purchasing backend tests: `24 passed` with 2 existing dependency deprecation warnings.
-- Full backend suite: `41 passed` with 3 existing warnings.
-- Frontend Vitest suite: `5 passed` in 1 file.
+- Focused inventory/purchasing backend tests: `32 passed` with 2 existing dependency deprecation warnings.
+- Full backend suite: `50 passed` with 3 existing warnings.
+- Frontend Vitest suite: `6 passed` in 1 file.
 - Frontend production build and TypeScript check: passed.
 - Root `./test.sh`: passed.
 - `git diff --check`: passed.

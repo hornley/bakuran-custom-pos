@@ -58,9 +58,9 @@ The suite uses mocked API responses and covers ready-queue selection, successful
 
 ## Current validation baseline
 
-- Focused inventory/purchasing backend: `24 passed` with 2 existing dependency deprecation warnings (`cd backend && .venv/bin/python -m pytest -q tests/test_inventory_purchasing.py`).
-- Full backend suite: `41 passed` with 3 existing warnings (`cd backend && .venv/bin/python -m pytest -q`).
-- Frontend Vitest suite: `5 passed` (`cd frontend && npm test`).
+- Focused inventory/purchasing backend: `32 passed` with 2 existing dependency deprecation warnings (`cd backend && .venv/bin/python -m pytest -q tests/test_inventory_purchasing.py`).
+- Full backend suite: `50 passed` with 3 existing warnings (`cd backend && .venv/bin/python -m pytest -q`).
+- Frontend Vitest suite: `6 passed` (`cd frontend && npm test`).
 - Frontend production build and TypeScript check: passed (`cd frontend && npm run build`).
 - Root `./test.sh`: passed; it reruns the full backend suite, frontend tests, and build.
 - `git diff --check`: passed.
