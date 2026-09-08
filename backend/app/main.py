@@ -296,6 +296,19 @@ class GenericIn(BaseModel):
     product_id: int | None = None
     supplier_id: int | None = None
     unit_cost: float = Field(default=0, ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
 
 
 class WarehouseIn(BaseModel):
@@ -502,6 +515,22 @@ class PurchaseCreateIn(BaseModel):
         return value
 
 
+class PurchaseLifecycleIn(BaseModel):
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
 def _active_product(c, product_id):
     row = c.execute("SELECT id FROM menu_items WHERE id=? AND active=1", (product_id,)).fetchone()
     if not row:
@@ -560,6 +589,13 @@ def create_warehouse(x: WarehouseIn, request: Request):
         try:
             n = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM warehouses").fetchone()[0]
             c.execute("INSERT INTO warehouses(id,code,name,active,created_at) VALUES (?,?,?,1,?)", (n, x.code, x.name, now_iso()))
+            c.execute(
+                """
+                INSERT INTO inventory(product_id,warehouse_id,on_hand,reserved,updated_at,reorder_level)
+                SELECT id, ?, 0, 0, ?, 5 FROM menu_items WHERE active=1
+                """,
+                (n, now_iso()),
+            )
         except sqlite3.IntegrityError:
             fail("Warehouse code already exists", 409)
         _audit(c, request, "inventory.warehouse_created", x.code)
@@ -815,16 +851,24 @@ def create_purchase(x: PurchaseCreateIn, request: Request):
 
 
 @app.post("/api/purchases/{pid}/order")
-def order_purchase(pid: int, request: Request):
+def order_purchase(pid: int, request: Request, x: PurchaseLifecycleIn | None = Body(default=None)):
     c = connect()
     try:
         c.execute("BEGIN IMMEDIATE")
+        payload = {"purchase_id": pid, "action": "order"}
+        key = x.idempotency_key if x else None
+        existing = _idempotent_response(c, f"purchasing.order:{pid}", key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
         purchase = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
         if not purchase:
             fail("Purchase not found", 404)
         if purchase["status"] == "ordered":
+            result = dict(purchase)
+            _save_idempotent_response(c, f"purchasing.order:{pid}", key, payload, result)
             c.commit()
-            return dict(purchase)
+            return result
         if purchase["status"] != "draft":
             fail("Only draft purchases can be ordered", 409)
         if not c.execute("SELECT 1 FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone():
@@ -832,8 +876,10 @@ def order_purchase(pid: int, request: Request):
         stamp = now_iso()
         c.execute("UPDATE purchases SET status='ordered',ordered_at=? WHERE id=?", (stamp, pid))
         _audit(c, request, "purchasing.ordered", f"purchase={pid}")
+        result = dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+        _save_idempotent_response(c, f"purchasing.order:{pid}", key, payload, result)
         c.commit()
-        return dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+        return result
     except HTTPException:
         c.rollback()
         raise
@@ -842,23 +888,33 @@ def order_purchase(pid: int, request: Request):
 
 
 @app.post("/api/purchases/{pid}/close")
-def close_purchase(pid: int, request: Request):
+def close_purchase(pid: int, request: Request, x: PurchaseLifecycleIn | None = Body(default=None)):
     c = connect()
     try:
         c.execute("BEGIN IMMEDIATE")
+        payload = {"purchase_id": pid, "action": "close"}
+        key = x.idempotency_key if x else None
+        existing = _idempotent_response(c, f"purchasing.close:{pid}", key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
         purchase = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
         if not purchase:
             fail("Purchase not found", 404)
         if purchase["status"] == "closed":
+            result = dict(purchase)
+            _save_idempotent_response(c, f"purchasing.close:{pid}", key, payload, result)
             c.commit()
-            return dict(purchase)
+            return result
         if purchase["status"] != "received":
             fail("Only fully received purchases can be closed", 409)
         stamp = now_iso()
         c.execute("UPDATE purchases SET status='closed',closed_at=? WHERE id=?", (stamp, pid))
         _audit(c, request, "purchasing.closed", f"purchase={pid}")
+        result = dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+        _save_idempotent_response(c, f"purchasing.close:{pid}", key, payload, result)
         c.commit()
-        return dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+        return result
     except HTTPException:
         c.rollback()
         raise
@@ -890,6 +946,11 @@ def receive_purchase(pid: int, request: Request, x: PurchaseReceiptIn | None = B
                     for row in outstanding
                 ]
             )
+            if p["status"] == "draft":
+                ordered_at = now_iso()
+                c.execute("UPDATE purchases SET status='ordered',ordered_at=? WHERE id=?", (ordered_at, pid))
+                _audit(c, request, "purchasing.ordered", f"purchase={pid};legacy_receive=true")
+                p = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
         payload = {
             "purchase_id": pid,
             "lines": sorted(
@@ -1010,6 +1071,17 @@ def stock_receipt(x: GenericIn, request: Request):
         c.execute("BEGIN IMMEDIATE")
         product_id = x.product_id or 1
         warehouse_id = 1
+        payload = {
+            "name": x.name,
+            "product_id": product_id,
+            "warehouse_id": warehouse_id,
+            "quantity": x.quantity,
+            "reference": x.value or "manual",
+        }
+        existing = _idempotent_response(c, "stock.receipt.legacy", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
         _active_product(c, product_id)
         _active_warehouse(c, warehouse_id)
         stamp = now_iso()
@@ -1017,11 +1089,13 @@ def stock_receipt(x: GenericIn, request: Request):
         c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?", (x.quantity, stamp, product_id, warehouse_id))
         c.execute(
             "INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (product_id, warehouse_id, "receipt", x.quantity, x.value or "manual", "Legacy stock receipt", None, stamp),
+            (product_id, warehouse_id, "receipt", x.quantity, x.value or "manual", "Legacy stock receipt", x.idempotency_key, stamp),
         )
         _audit(c, request, "inventory.receipt_legacy", f"product={product_id};warehouse={warehouse_id};quantity={x.quantity}")
+        result = {"product_id": product_id, "quantity": x.quantity}
+        _save_idempotent_response(c, "stock.receipt.legacy", x.idempotency_key, payload, result)
         c.commit()
-        return {"product_id": product_id, "quantity": x.quantity}
+        return result
     except HTTPException:
         c.rollback()
         raise

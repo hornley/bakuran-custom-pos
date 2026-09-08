@@ -3,6 +3,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
+type Row = Record<string, any>;
+
 const menu = [{ id: 1, name: "Adobo", category_name: "Mains", description: "Savory", price: 12 }];
 const order = { id: 7, order_number: "BK-007", status: "open", total: 12, customer_name: "", lines: [] };
 
@@ -134,6 +136,66 @@ describe("counter operational flows", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5300/api/purchases", expect.objectContaining({ credentials: "include" }));
     expect(container.textContent).toContain("Move stock with a reason");
     expect(container.textContent).toContain("Low-stock visibility");
+    await act(async () => root.unmount());
+  });
+
+  it("submits selected partial receipts and explicit over-receipt authorization details", async () => {
+    const purchase = {
+      id: 5,
+      purchase_number: "PUR-0005",
+      supplier_name: "Local Supply",
+      status: "ordered",
+      total: 80,
+      lines: [{ id: 9, product_id: 1, warehouse_id: 1, product_name: "Adobo", warehouse_code: "MAIN", received_quantity: 0, quantity: 10, unit_cost: 8 }],
+    };
+    const receiptRequests: Row[] = [];
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (options?.method === "POST" && url.endsWith("/api/purchases/5/receive")) {
+        receiptRequests.push(JSON.parse(String(options.body)));
+        return response({ purchase, lines: purchase.lines });
+      }
+      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events")) return response([]);
+      if (url.includes("/api/inventory?warehouse_id=1")) return response({ products: [{ product_id: 1, sku: "ADO-001", name: "Adobo", warehouse_id: 1, on_hand: 5, reserved: 0, available: 5, reorder_level: 2, low_stock: false, reorder_quantity: 0 }], movements: [] });
+      if (url.endsWith("/api/warehouses")) return response([{ id: 1, code: "MAIN", name: "Main Warehouse" }]);
+      if (url.endsWith("/api/purchases")) return response([purchase]);
+      if (url.endsWith("/api/catalog")) return response(menu.map((item) => ({ ...item, sku: "ADO-001", active: 1 })));
+      if (url.endsWith("/api/suppliers")) return response([{ id: 1, name: "Local Supply", active: 1 }]);
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => { button(container, "Operations").click(); });
+    await settle();
+    const receiptInput = container.querySelector<HTMLInputElement>('input[aria-label="Receive Adobo"]')!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setInputValue?.call(receiptInput, "3");
+      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button(container, "Receive selected").click());
+    await settle();
+    expect(receiptRequests[0]).toMatchObject({
+      lines: [{ product_id: 1, warehouse_id: 1, quantity: 3 }],
+      allow_over_receipt: false,
+    });
+
+    const override = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    await act(async () => override.click());
+    await settle();
+    const reason = container.querySelector<HTMLInputElement>('input[placeholder="Manager/admin reason"]')!;
+    await act(async () => {
+      setInputValue?.call(reason, "Manager approved supplier variance");
+      reason.dispatchEvent(new Event("input", { bubbles: true }));
+      setInputValue?.call(receiptInput, "11");
+      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => button(container, "Receive selected").click());
+    await settle();
+    expect(receiptRequests[1]).toMatchObject({
+      lines: [{ product_id: 1, warehouse_id: 1, quantity: 11 }],
+      allow_over_receipt: true,
+      override_reason: "Manager approved supplier variance",
+    });
     await act(async () => root.unmount());
   });
 });

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import "./styles.css";
 import { csrfHeaders } from "./auth";
 
@@ -75,6 +75,7 @@ export default function App() {
   const [secondary, setSecondary] = useState<Record<string, Row[]>>({});
   const [search, setSearch] = useState("");
   const [operationsWarehouse, setOperationsWarehouse] = useState(1);
+  const secondaryRequest = useRef(0);
 
   const categories = useMemo(
     () => Array.from(new Set(menu.map((item) => String(item.category_name || item.category || "Menu")))),
@@ -257,6 +258,7 @@ export default function App() {
 
   async function loadSecondary(target: View, warehouseId = operationsWarehouse) {
     if (target === "order") return;
+    const requestId = ++secondaryRequest.current;
     try {
       setSecondaryLoading(true);
       const path = target === "payments"
@@ -275,6 +277,7 @@ export default function App() {
           api<Row[]>("/api/suppliers"),
           api<Row[]>("/api/audit-events"),
         ]);
+        if (requestId !== secondaryRequest.current) return;
         setSecondary((current) => ({
           ...current,
           operations: tables,
@@ -289,12 +292,15 @@ export default function App() {
         }));
       } else {
         const values = await api<Row[]>(path);
+        if (requestId !== secondaryRequest.current) return;
         setSecondary((current) => ({ ...current, [target]: values }));
       }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not load this operational view.");
+      if (requestId === secondaryRequest.current) {
+        setError(reason instanceof Error ? reason.message : "Could not load this operational view.");
+      }
     } finally {
-      setSecondaryLoading(false);
+      if (requestId === secondaryRequest.current) setSecondaryLoading(false);
     }
   }
 
@@ -358,7 +364,7 @@ export default function App() {
     try {
       setBusy(`purchase-${action}-${purchaseId}`);
       setError("");
-      await api(`/api/purchases/${purchaseId}/${action}`, { method: "POST", body: JSON.stringify({}) });
+      await api(`/api/purchases/${purchaseId}/${action}`, { method: "POST", body: JSON.stringify({ idempotency_key: operationKey(`purchase-${action}`) }) });
       setNotice(action === "order" ? "Purchase ordered." : "Purchase closed.");
       await loadSecondary("operations");
     } catch (reason) {
@@ -775,6 +781,10 @@ function SecondaryView({
     setAdjustmentReason("");
   }
 
+  function reorderKey(row: Row) {
+    return `${row.warehouse_id}-${row.product_id}`;
+  }
+
   return (
     <section className="secondary-page">
       <div className="secondary-heading">
@@ -830,8 +840,8 @@ function SecondaryView({
             <section className="panel operations-panel">
               <span className="eyebrow">Inventory / reorder</span>
               <h3>Low-stock visibility</h3>
-              {lowStockRows.length ? <div className="simple-list">{lowStockRows.map((row) => <div className="simple-row inventory-row" key={`${row.warehouse_id}-${row.product_id}`}><div><strong>{row.name}</strong><small>{row.available} available · reorder {row.reorder_quantity}</small></div><div className="inline-control"><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[row.product_id] ?? row.reorder_level} onChange={(event) => setReorderLevels({ ...reorderLevels, [row.product_id]: event.target.value })} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[row.product_id] ?? row.reorder_level)) })}>Save</button></div></div>)}</div> : <Empty>No low-stock products in this warehouse.</Empty>}
-              <div className="inventory-table">{inventoryRows.map((row) => <div className="simple-row inventory-row" key={`${row.warehouse_id}-${row.product_id}`}><div><strong>{row.sku} · {row.name}</strong><small>{row.on_hand} on hand · {row.reserved} reserved · available {row.available}</small></div><div className="inline-control"><StatusPill value={row.low_stock ? "low stock" : "healthy"} /><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[row.product_id] ?? row.reorder_level} onChange={(event) => setReorderLevels({ ...reorderLevels, [row.product_id]: event.target.value })} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[row.product_id] ?? row.reorder_level)) })}>Save</button></div></div>)}</div>
+              {lowStockRows.length ? <div className="simple-list">{lowStockRows.map((row) => { const key = reorderKey(row); return <div className="simple-row inventory-row" key={key}><div><strong>{row.name}</strong><small>{row.available} available · reorder {row.reorder_quantity}</small></div><div className="inline-control"><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[key] ?? row.reorder_level} onChange={(event) => setReorderLevels((levels) => ({ ...levels, [key]: event.target.value }))} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[key] ?? row.reorder_level)) })}>Save</button></div></div>; })}</div> : <Empty>No low-stock products in this warehouse.</Empty>}
+              <div className="inventory-table">{inventoryRows.map((row) => { const key = reorderKey(row); return <div className="simple-row inventory-row" key={key}><div><strong>{row.sku} · {row.name}</strong><small>{row.on_hand} on hand · {row.reserved} reserved · available {row.available}</small></div><div className="inline-control"><StatusPill value={row.low_stock ? "low stock" : "healthy"} /><input className="compact-input" aria-label={`Reorder level for ${row.name}`} type="number" min="0" value={reorderLevels[key] ?? row.reorder_level} onChange={(event) => setReorderLevels((levels) => ({ ...levels, [key]: event.target.value }))} /><button className="text-button" disabled={!!busy} onClick={() => onReorderLevel({ product_id: row.product_id, warehouse_id: row.warehouse_id, reorder_level: Math.max(0, Number(reorderLevels[key] ?? row.reorder_level)) })}>Save</button></div></div>; })}</div>
             </section>
           </div>
 

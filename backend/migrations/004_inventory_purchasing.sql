@@ -20,8 +20,15 @@ CREATE TABLE inventory_new (
     UNIQUE(product_id, warehouse_id)
 );
 INSERT INTO inventory_new(id, product_id, warehouse_id, on_hand, reserved, updated_at, reorder_level)
-SELECT id, product_id, warehouse_id, on_hand, reserved, updated_at, 5
-FROM inventory;
+SELECT MIN(id),
+       product_id,
+       1,
+       SUM(on_hand),
+       CASE WHEN SUM(reserved) > SUM(on_hand) THEN SUM(on_hand) ELSE SUM(reserved) END,
+       MAX(updated_at),
+       5
+FROM inventory
+GROUP BY product_id;
 DROP TABLE inventory;
 ALTER TABLE inventory_new RENAME TO inventory;
 CREATE INDEX idx_inventory_warehouse ON inventory(warehouse_id, product_id);
@@ -53,9 +60,38 @@ CREATE TABLE idempotency_keys (
 );
 CREATE INDEX idx_idempotency_operation ON idempotency_keys(operation);
 
-CREATE TABLE audit_events (
+CREATE TABLE IF NOT EXISTS auth_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    actor_user_id INTEGER,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_roles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS auth_user_roles (
+    user_id INTEGER NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    role_id INTEGER NOT NULL REFERENCES auth_roles(id) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, role_id)
+);
+CREATE TABLE IF NOT EXISTS auth_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    csrf_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_token ON auth_sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry ON auth_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_user_id INTEGER REFERENCES auth_users(id) ON DELETE SET NULL,
     event_type TEXT NOT NULL,
     path TEXT NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT '',
@@ -113,7 +149,14 @@ CREATE TABLE purchase_lines (
     UNIQUE(purchase_id, product_id, warehouse_id)
 );
 INSERT INTO purchase_lines(id, purchase_id, product_id, warehouse_id, quantity, unit_cost, received_quantity)
-SELECT id, purchase_id, product_id, warehouse_id, quantity, unit_cost, received_quantity
-FROM purchase_lines_backup;
+SELECT b.id,
+       b.purchase_id,
+       b.product_id,
+       b.warehouse_id,
+       b.quantity,
+       b.unit_cost,
+       CASE WHEN p.status IN ('received', 'closed') THEN b.quantity ELSE b.received_quantity END
+FROM purchase_lines_backup b
+JOIN purchases p ON p.id = b.purchase_id;
 DROP TABLE purchase_lines_backup;
 CREATE INDEX idx_purchase_lines_purchase ON purchase_lines(purchase_id);

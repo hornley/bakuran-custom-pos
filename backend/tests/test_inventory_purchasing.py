@@ -32,6 +32,9 @@ def test_inventory_is_warehouse_aware_and_adjustments_require_reason(client):
     created = client.post("/api/warehouses", json={"code": "COLD", "name": "Cold Store"})
     assert created.status_code == 200
     warehouse_id = created.json()["id"]
+    fresh_inventory = client.get(f"/api/inventory?warehouse_id={warehouse_id}").json()["products"]
+    assert len(fresh_inventory) == 4
+    assert all(row["on_hand"] == 0 and row["low_stock"] for row in fresh_inventory)
 
     assert client.post(
         "/api/stock/adjustment",
@@ -174,6 +177,25 @@ def test_purchase_creation_and_line_idempotency_are_durable(client):
     assert conflict.status_code == 409
 
 
+def test_purchase_order_and_close_idempotency_are_durable(client):
+    pid = create_purchase(client, quantity=2)
+    order_payload = {"idempotency_key": "order-once"}
+    first_order = client.post(f"/api/purchases/{pid}/order", json=order_payload)
+    second_order = client.post(f"/api/purchases/{pid}/order", json=order_payload)
+    assert first_order.status_code == second_order.status_code == 200
+    assert first_order.json() == second_order.json()
+
+    assert client.post(
+        f"/api/purchases/{pid}/receive",
+        json={"lines": [{"product_id": 1, "quantity": 2}]},
+    ).status_code == 200
+    close_payload = {"idempotency_key": "close-once"}
+    first_close = client.post(f"/api/purchases/{pid}/close", json=close_payload)
+    second_close = client.post(f"/api/purchases/{pid}/close", json=close_payload)
+    assert first_close.status_code == second_close.status_code == 200
+    assert first_close.json() == second_close.json()
+
+
 def test_purchase_is_received_only_after_every_line_is_received(client):
     pid = create_purchase(client, product_ids=(1, 2), quantity=2)
     assert client.post(f"/api/purchases/{pid}/order").status_code == 200
@@ -197,6 +219,7 @@ def test_legacy_receive_call_still_receives_draft_purchase(client):
     response = client.post(f"/api/purchases/{pid}/receive")
     assert response.status_code == 200
     assert response.json()["status"] == "received"
+    assert response.json()["ordered_at"]
     assert stock(client)["on_hand"] == 23
 
 
@@ -281,6 +304,19 @@ def test_receipt_and_adjustment_idempotency_do_not_double_mutate(client):
         assert connection.execute("SELECT COUNT(*) FROM stock_movements WHERE idempotency_key='receipt-1'").fetchone()[0] == 1
 
 
+def test_legacy_stock_receipt_supports_durable_idempotency(client):
+    payload = {"name": "legacy retry", "product_id": 1, "quantity": 2, "idempotency_key": "legacy-receipt"}
+    first = client.post("/api/stock/receipt", json=payload)
+    second = client.post("/api/stock/receipt", json=payload)
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert stock(client)["on_hand"] == 22
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements WHERE idempotency_key='legacy-receipt'").fetchone()[0] == 1
+    conflict = client.post("/api/stock/receipt", json={**payload, "quantity": 3})
+    assert conflict.status_code == 409
+
+
 def test_concurrent_receipt_retries_are_durable_and_atomic(client):
     pid = create_purchase(client, quantity=5)
     assert client.post(f"/api/purchases/{pid}/order").status_code == 200
@@ -305,12 +341,19 @@ def test_inventory_mutation_rolls_back_if_a_multi_line_receipt_fails(client):
     pid = create_purchase(client, product_ids=(1, 2), quantity=2)
     client.post(f"/api/purchases/{pid}/order")
     before = {product_id: stock(client, product_id)["on_hand"] for product_id in (1, 2)}
+    with db.connect() as connection:
+        movement_count = connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0]
+        audit_count = connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
     result = client.post(
         f"/api/purchases/{pid}/receive",
         json={"lines": [{"product_id": 1, "quantity": 1}, {"product_id": 2, "quantity": 3}]},
     )
     assert result.status_code == 409
     assert {product_id: stock(client, product_id)["on_hand"] for product_id in (1, 2)} == before
+    with db.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM stock_movements").fetchone()[0] == movement_count
+        assert connection.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == audit_count
+        assert connection.execute("SELECT SUM(received_quantity) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0] == 0
 
 
 def test_audit_events_capture_inventory_and_purchase_mutations(client):
@@ -430,4 +473,74 @@ def test_database_has_concurrent_safe_inventory_constraints(client):
             connection.execute(
                 "INSERT INTO inventory(product_id,warehouse_id,on_hand,reserved,updated_at) VALUES (1,1,1,2,'now')"
             )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO audit_events(actor_user_id,event_type,created_at) VALUES (999,'invalid-actor','now')"
+            )
         assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+
+
+def test_legacy_inventory_and_received_purchase_data_migrate_to_main_warehouse(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DATABASE_PATH", tmp_path / "legacy.db")
+    connection = db.connect()
+    connection.execute("BEGIN IMMEDIATE")
+    connection.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+    for migration in db.MIGRATIONS[:3]:
+        for statement in db._migration_statements(migration.read_text(encoding="utf-8")):
+            connection.execute(statement)
+        connection.execute("INSERT INTO schema_migrations VALUES (?,?)", (int(migration.name.split("_", 1)[0]), db.SEED_TIMESTAMP))
+    connection.execute("INSERT INTO menu_categories VALUES (1,'FOOD','Food',1)")
+    connection.execute("INSERT INTO menu_items VALUES (1,'SKU-1',1,'Legacy product','Legacy',1,1)")
+    connection.execute("INSERT INTO suppliers VALUES (1,'SUP-1','Legacy supplier','',1)")
+    connection.execute("INSERT INTO inventory VALUES (10,1,99,7,2,'2026-01-02T00:00:00Z')")
+    connection.execute("INSERT INTO inventory VALUES (11,1,100,5,1,'2026-01-03T00:00:00Z')")
+    connection.execute("INSERT INTO stock_movements VALUES (1,1,'receipt',12,'legacy','2026-01-03T00:00:00Z')")
+    connection.execute("INSERT INTO purchases VALUES (1,'PUR-1',1,'received',24,'2026-01-01T00:00:00Z','2026-01-04T00:00:00Z')")
+    connection.execute("INSERT INTO purchase_lines VALUES (1,1,1,3,8)")
+    connection.commit()
+    connection.close()
+
+    db.initialize()
+
+    with db.connect() as migrated:
+        inventory = migrated.execute("SELECT warehouse_id,on_hand,reserved FROM inventory WHERE product_id=1").fetchall()
+        line = migrated.execute("SELECT received_quantity FROM purchase_lines WHERE id=1").fetchone()
+        assert [tuple(row) for row in inventory] == [(1, 12, 3)]
+        assert line[0] == 3
+        assert migrated.execute("PRAGMA foreign_key_check").fetchone() is None
+
+
+def test_auth_initialization_repairs_legacy_audit_actor_references(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DATABASE_PATH", tmp_path / "auth-migration.db")
+    db.initialize(reset=True)
+    connection = db.connect()
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute(
+        """
+        CREATE TABLE audit_events_old(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actor_user_id INTEGER,
+            event_type TEXT NOT NULL,
+            path TEXT NOT NULL DEFAULT '',
+            detail TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute("INSERT INTO audit_events_old SELECT id,actor_user_id,event_type,path,detail,created_at FROM audit_events")
+    connection.execute("INSERT INTO audit_events_old(actor_user_id,event_type,created_at) VALUES (999,'orphan','now')")
+    connection.execute("DROP TABLE audit_events")
+    connection.execute("ALTER TABLE audit_events_old RENAME TO audit_events")
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setattr(auth, "auth_enabled", lambda: True)
+    monkeypatch.setenv("AUTH_BOOTSTRAP_USERNAME", "bootstrap")
+    monkeypatch.setenv("AUTH_BOOTSTRAP_PASSWORD", "bootstrap-password")
+    auth.initialize_auth()
+
+    with db.connect() as migrated:
+        assert any(row["table"] == "auth_users" for row in migrated.execute("PRAGMA foreign_key_list(audit_events)"))
+        assert migrated.execute("SELECT actor_user_id FROM audit_events WHERE event_type='orphan'").fetchone()[0] is None
+        assert migrated.execute("PRAGMA foreign_key_check").fetchone() is None
