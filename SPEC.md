@@ -201,8 +201,10 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `POST /api/orders/{order_id}/close` | Complete pickup and issue a receipt |
 | `GET /api/payment-queue` | List unpaid submitted orders for front-desk selection |
 | `GET /api/kitchen` | List kitchen tickets |
-| `GET /api/receipts` | List sales receipts |
+| `GET /api/receipts` | List sales receipts with immutable tax snapshots |
 | `GET /api/tables` | Secondary operations reference |
+| `GET /api/tax/configuration` | List tax rules and the rule effective today |
+| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
 
 ### Order metadata
 
@@ -215,6 +217,32 @@ Orders support:
 - Payment state
 - Kitchen eligibility and ticket state
 
+### Tax calculation and snapshots
+
+- Tax rules contain a name, a decimal percentage rate from `0` through `100`, an
+  `exclusive` or `inclusive` policy, and an ISO effective date range. Rates are
+  stored as text and support at most four decimal places.
+- The server selects the rule effective on the confirmation date. Effective
+  ranges are inclusive; overlapping ranges are rejected, while adjacent date
+  ranges are allowed.
+- All tax and payment amounts use `Decimal`, with explicit half-up rounding to
+  cents. Exclusive tax is calculated from the pre-tax subtotal; inclusive tax
+  extracts the tax from the tax-inclusive total.
+- Confirmation copies the selected rule and calculated taxable subtotal, tax,
+  and total to the order. Payment must equal that tax-inclusive total to the
+  cent, and payment still gates kitchen release.
+- Closing copies the order tax snapshot into exactly one immutable receipt.
+  Later rule changes cannot alter historical orders or receipts.
+- If no rule is effective, the existing zero-tax total is preserved. Records
+  created before this migration remain zero-tax and are not retroactively
+  recalculated.
+- With the checked-in `auth_profile: disabled` deployment, local API access is
+  intentionally unauthenticated so the existing local desk still opens
+  directly. Setting `AUTH_PROFILE=local` and `AUTH_ENABLED=true` enables the
+  existing local-session middleware; tax configuration then requires a manager
+  or administrator and uses CSRF protection. This is local authentication,
+  not hosted identity, SSO, MFA, or a compliance certification.
+
 ## 7. Error and recovery behavior
 
 - API failures remain on the current screen and show a dismissible error.
@@ -223,6 +251,8 @@ Orders support:
 - Failed payments leave the order unpaid and out of the kitchen.
 - Back navigation is non-destructive.
 - Invalid kitchen transitions return a conflict response.
+- Invalid tax configuration returns validation/conflict responses without a
+  partial write, and each successful configuration is recorded in `audit_events`.
 - Premature kitchen release and invalid payment attempts must not mutate order state.
 - Cancellation, voids, refunds, and destructive resets are outside the current POS scope.
 

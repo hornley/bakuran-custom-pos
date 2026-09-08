@@ -123,6 +123,11 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
 .order-total { display: flex; justify-content: space-between; border-top: 1px solid var(--line); margin-top: 13px; padding-top: 16px; }
 .order-total span { color: var(--muted); font-size: 11px; }
 .order-total strong { font-size: 19px; letter-spacing: -.04em; }
+.tax-breakdown { margin-top: 13px; border-top: 1px solid var(--line); padding-top: 10px; }
+.tax-breakdown-row { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 11px; padding: 5px 0; }
+.tax-breakdown-row strong { color: var(--cream); font-weight: 500; }
+.tax-breakdown-total { border-top: 1px solid var(--line-soft); margin-top: 5px; padding-top: 10px; color: var(--cream); }
+.tax-breakdown-total strong { color: var(--amber); font-size: 19px; letter-spacing: -.04em; }
 .basket-panel .action-button { margin-top: 18px; }
 .status-pill { display: inline-flex; align-items: center; gap: 6px; width: fit-content; border: 1px solid var(--line); color: var(--muted); padding: 5px 8px; font-size: 10px; white-space: nowrap; }
 .status-pill > span { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
@@ -174,12 +179,22 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
 .queue-side { display: flex; align-items: center; gap: 13px; }
 .queue-side > strong { color: var(--amber); font-size: 16px; }
 .operations-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.tax-config-panel { margin-top: 18px; }
+.tax-active-rule { display: grid; gap: 6px; margin: 18px 0; padding: 13px; border: 1px solid var(--line-soft); background: var(--panel-2); }
+.tax-active-rule strong { font-size: 13px; font-weight: 550; }
+.tax-rule-form { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; align-items: end; margin-top: 18px; }
+.tax-rule-form label { display: grid; gap: 7px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.tax-rule-form .text-input { min-width: 0; }
+.tax-save { min-height: 41px; }
+.muted-label { color: var(--faint); font-size: 9px; text-transform: none; letter-spacing: 0; }
+.tax-rule-list { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 16px; }
 .operations-grid h3 { margin: 10px 0; }
 .simple-row { grid-template-columns: minmax(0, 1fr) auto; }
 .footer { display: flex; justify-content: space-between; gap: 15px; border-top: 1px solid var(--line); color: var(--faint); font-size: 10px; padding: 17px 5vw; }
 
 @media (max-width: 900px) {
   .flow-grid, .handoff-card, .operations-grid { grid-template-columns: 1fr; }
+  .tax-rule-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .entry-grid { grid-template-columns: 1fr; }
   .basket-panel { position: static; }
   .handoff-action { border-left: 0; border-top: 1px solid var(--line); padding: 24px 0 0; }
@@ -198,6 +213,7 @@ h3 { margin: 7px 0 5px; font-size: 16px; letter-spacing: -.03em; }
   .step:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
   .panel, .secondary-page { padding: 17px; }
   .menu-list { grid-template-columns: 1fr; }
+  .tax-rule-form { grid-template-columns: 1fr; }
   .menu-controls { justify-content: space-between; }
   .queue-card { align-items: flex-start; flex-direction: column; }
   .queue-side { width: 100%; justify-content: space-between; }

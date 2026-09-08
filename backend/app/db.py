@@ -17,6 +17,8 @@ REQUIRED_TABLES = frozenset(
         "kitchen_tickets",
         "payments",
         "receipts",
+        "tax_rules",
+        "audit_events",
     }
 )
 RESET_STATEMENTS = tuple(
@@ -26,7 +28,7 @@ RESET_STATEMENTS = tuple(
         "restaurant_orders", "table_sessions", "inventory", "menu_items",
         "menu_categories", "dining_tables", "dining_areas", "notifications", "settings",
         "attendance", "stock_movements", "purchase_lines", "purchases", "suppliers",
-        "customers", "catalog_items", "audit_events", "auth_sessions", "auth_user_roles", "auth_roles", "auth_users",
+        "customers", "catalog_items", "audit_events", "auth_sessions", "auth_user_roles", "auth_roles", "auth_users", "tax_rules",
         "schema_migrations",
     )
 )

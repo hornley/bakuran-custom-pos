@@ -107,7 +107,10 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_created ON audit_events(created_at);
 
 
 def auth_enabled() -> bool:
-    return AUTH_PROFILE == "local" and os.getenv("AUTH_ENABLED", "false").lower() not in {"0", "false", "no", "off"}
+    profile = os.getenv("AUTH_PROFILE", AUTH_PROFILE).strip().lower()
+    configured = os.getenv("AUTH_ENABLED")
+    enabled = configured if configured is not None else "false"
+    return profile == "local" and enabled.lower() not in {"0", "false", "no", "off"}
 
 
 def _now() -> datetime:

@@ -93,7 +93,7 @@ describe("counter operational flows", () => {
     await settle();
 
     expect(paymentRequests).toHaveLength(1);
-    expect(JSON.parse(String(paymentRequests[0].body))).toEqual({ amount: 12, method: "cash" });
+    expect(JSON.parse(String(paymentRequests[0].body))).toEqual({ amount: "12", method: "cash" });
     expect(container.textContent).toContain("Order is moving.");
     await act(async () => root.unmount());
   });
@@ -114,6 +114,53 @@ describe("counter operational flows", () => {
     await settle();
     expect(container.textContent).toContain("Kitchen temporarily unavailable");
     expect(container.textContent).toContain("Choose items");
+    await act(async () => root.unmount());
+  });
+
+  it("renders the server tax breakdown in the confirmation step", async () => {
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order: { ...order }, lines: [] });
+      if (url.endsWith("/lines")) return response({ order: { ...order, total: 12 }, lines: [line] });
+      if (url.endsWith("/confirm")) return response({ order: { ...order, total: 13.2, customer_name: "Mika", status: "awaiting_payment", tax_policy: "exclusive", tax_rate: "10.00", tax_name: "VAT", taxable_subtotal: "12.00", tax_amount: "1.20" }, lines: [line], tax: { policy: "exclusive", rate: "10.00", name: "VAT", taxable_subtotal: "12.00", tax_amount: "1.20", total: "13.20" } });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => container.querySelector<HTMLButtonElement>(".basket-actions button")!.click());
+    await settle();
+    const name = container.querySelector<HTMLInputElement>("#customer-name")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => { setInputValue?.call(name, "Mika"); name.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => button(container, "Continue to payment").click());
+    await settle();
+    expect(container.textContent).toContain("VAT (10.00%)");
+    expect(container.textContent).toContain("$1.20");
+    expect(container.textContent).toContain("$13.20");
+    await act(async () => root.unmount());
+  });
+
+  it("loads tax configuration as a secondary operations view and can save a rule", async () => {
+    const configuration = { rules: [], effective_rule: null };
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/tables")) return response([]);
+      if (url.endsWith("/api/receipts")) return response([]);
+      if (url.endsWith("/api/tax/configuration") && options?.method === "POST") return response({ id: 1 });
+      if (url.endsWith("/api/tax/configuration")) return response(configuration);
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    await act(async () => button(container, "Operations").click());
+    await settle();
+    expect(container.querySelector('[aria-label="Tax configuration"]')).toBeTruthy();
+    await act(async () => button(container, "Save tax rule").click());
+    await settle();
+    expect(fetchMock.mock.calls.some(([url, options]) => String(url).endsWith("/api/tax/configuration") && (options as RequestInit)?.method === "POST")).toBe(true);
     await act(async () => root.unmount());
   });
 });

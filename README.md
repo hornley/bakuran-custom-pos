@@ -16,6 +16,7 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
 - [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
 - [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
+- [`docs/phases/phase-6-tax-configuration.md`](docs/phases/phase-6-tax-configuration.md): tax rules, rounding, snapshots, and validation.
 
 ## Run the project
 
@@ -65,6 +66,7 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 - Table service: view floor/table status and guarded open/close transitions. Table orders can carry `customer_name` and `order_channel=qr` for the future QR route.
 - Kitchen queue: move tickets through `queued -> preparing -> ready -> served`.
 - Attendance: review employee attendance status.
+- Tax: configure effective inclusive/exclusive rules from the secondary Operations view and review tax breakdowns on orders.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
 
 Purchasing and inventory APIs remain available as deferred back-office capabilities, but they are not loaded or used by the focused POS desk.
@@ -103,9 +105,25 @@ GET /api/search
 
 Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. Inventory and purchasing endpoints remain available as deferred back-office APIs, but the POS frontend does not load or use them. The frontend uses `/api/receipts` for sales receipts.
 
+## Tax configuration
+
+The desk is zero-tax compatible when no rule is active. Tax rules are created from
+the secondary Operations view or `POST /api/tax/configuration`; the server validates
+decimal rates (`0`–`100`), inclusive/exclusive policy, and non-overlapping inclusive
+effective date ranges. Confirmation snapshots the effective rule and calculates
+tax with `Decimal` half-up cent rounding. Payment must equal the tax-inclusive
+total, and receipts retain the same immutable snapshot.
+
 ## Authentication
 
-The current manifest uses `auth_profile: disabled`, so the desk opens directly. The generated backend retains the local authentication and CSRF modules for an opt-in local-auth variant. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
+The checked-in deployment uses `auth_profile: disabled`, so the desk opens directly
+and tax configuration is available to the local developer without credentials.
+For an explicit local-auth deployment, set `AUTH_PROFILE=local` and
+`AUTH_ENABLED=true`, plus `AUTH_BOOTSTRAP_USERNAME` and
+`AUTH_BOOTSTRAP_PASSWORD` on first startup. The existing local session/CSRF
+middleware then protects the API and only manager/admin users can configure tax.
+This is an honest local-development contract, not hosted identity, SSO, MFA,
+password recovery, or fiscal/accounting compliance.
 
 ## Troubleshooting
 
@@ -119,4 +137,4 @@ If another application owns either port, stop that application before running `.
 
 ## Boundaries
 
-This is a local SQLite operational slice. It does not include multi-location synchronization, reservations, delivery, online ordering, external payment gateways, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, webhooks, background workers, hosted deployment, or third-party identity providers.
+This is a local SQLite operational slice. It does not include multi-location synchronization, reservations, delivery, online ordering, external payment gateways, refunds, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, webhooks, background workers, hosted deployment, or third-party identity providers. Tax is limited to the configured single-store rules and snapshots described above; it is not fiscal-device or accounting compliance.
