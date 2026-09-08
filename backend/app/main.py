@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hashlib
+import json
 import sqlite3
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
-from .db import connect, initialize
+from .db import REQUIRED_TABLES, connect, initialize
 from .auth import AUTH_ALLOWED_ORIGINS, AuthMiddleware, initialize_auth, router as auth_router
 
 try:
@@ -94,7 +96,7 @@ def transition(ticket_id, expected, target, column):
 def health():
     try:
         with connect() as c:
-            required = {"schema_migrations", "dining_tables", "menu_items", "table_sessions", "restaurant_orders", "receipts"}
+            required = REQUIRED_TABLES
             available = {row["name"] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = sorted(required - available)
             if missing:
@@ -296,6 +298,241 @@ class GenericIn(BaseModel):
     unit_cost: float = Field(default=0, ge=0)
 
 
+class WarehouseIn(BaseModel):
+    code: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=120)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("code", "name", mode="before")
+    @classmethod
+    def text_valid(cls, value):
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+class StockAdjustmentIn(BaseModel):
+    product_id: int = Field(gt=0)
+    warehouse_id: int = Field(default=1, gt=0)
+    quantity: int
+    reason: str = Field(min_length=1, max_length=240)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def reason_valid(cls, value):
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("reason must not be blank")
+        return value
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+class PurchaseLineIn(BaseModel):
+    product_id: int = Field(default=1, gt=0)
+    warehouse_id: int = Field(default=1, gt=0)
+    quantity: int = Field(gt=0)
+    unit_cost: float = Field(ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+class PurchaseReceiptLineIn(BaseModel):
+    product_id: int = Field(gt=0)
+    warehouse_id: int = Field(default=1, gt=0)
+    quantity: int = Field(gt=0)
+
+
+class PurchaseReceiptIn(BaseModel):
+    lines: list[PurchaseReceiptLineIn] = Field(min_length=1)
+    allow_over_receipt: bool = False
+    override_reason: str | None = Field(default=None, max_length=240)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("override_reason", mode="before")
+    @classmethod
+    def override_reason_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        return value or None
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+class ReorderLevelIn(BaseModel):
+    product_id: int = Field(gt=0)
+    warehouse_id: int = Field(default=1, gt=0)
+    reorder_level: int = Field(ge=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+def _auth_user_id(request):
+    user = getattr(request.state, "auth_user", None)
+    return user["id"] if user else None
+
+
+def _auth_roles(request):
+    user = getattr(request.state, "auth_user", None)
+    return set(user.get("roles", [])) if user else set()
+
+
+def _audit(c, request, event_type, detail=""):
+    user = getattr(request.state, "auth_user", None)
+    actor_id = user["id"] if user else None
+    c.execute(
+        "INSERT INTO audit_events(actor_user_id,event_type,path,detail,created_at) VALUES (?,?,?,?,?)",
+        (actor_id, event_type, request.url.path[:240], detail[:500], now_iso()),
+    )
+
+
+def _request_hash(payload):
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _idempotent_response(c, operation, key, payload):
+    if not key:
+        return None
+    row = c.execute("SELECT operation,request_hash,response_json FROM idempotency_keys WHERE key=?", (key,)).fetchone()
+    if row and (row["operation"] != operation or row["request_hash"] != _request_hash(payload)):
+        fail("Idempotency key was already used for a different request", 409)
+    return json.loads(row["response_json"]) if row else None
+
+
+def _save_idempotent_response(c, operation, key, payload, response):
+    if key:
+        c.execute(
+            "INSERT INTO idempotency_keys(key,operation,request_hash,response_json,created_at) VALUES (?,?,?,?,?)",
+            (key, operation, _request_hash(payload), json.dumps(response, sort_keys=True), now_iso()),
+        )
+
+
+def _require_override_authority(request):
+    # Optional-auth deployments accept the same workflow for unauthenticated
+    # operators, while an enabled auth deployment reserves overrides for admins
+    # and managers. The middleware already authenticates every API request.
+    if auth_enabled_for_request(request) and not (_auth_roles(request) & {"admin", "manager"}):
+        fail("Manager or admin role is required for an over-receipt override", 403)
+
+
+def auth_enabled_for_request(request):
+    # Import lazily so tests and disabled deployments keep the existing path.
+    from .auth import auth_enabled
+    return auth_enabled()
+
+
+class PurchaseCreateIn(BaseModel):
+    supplier_id: int = Field(default=1, gt=0)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=120)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def idempotency_key_valid(cls, value):
+        if value is None:
+            return value
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("idempotency_key must not be blank")
+        return value
+
+
+def _active_product(c, product_id):
+    row = c.execute("SELECT id FROM menu_items WHERE id=? AND active=1", (product_id,)).fetchone()
+    if not row:
+        fail("Product not found", 404)
+    return row
+
+
+def _active_warehouse(c, warehouse_id):
+    row = c.execute("SELECT id FROM warehouses WHERE id=? AND active=1", (warehouse_id,)).fetchone()
+    if not row:
+        fail("Warehouse not found", 404)
+    return row
+
+
+def _ensure_inventory_row(c, product_id, warehouse_id, stamp=None):
+    row = c.execute(
+        "SELECT * FROM inventory WHERE product_id=? AND warehouse_id=?",
+        (product_id, warehouse_id),
+    ).fetchone()
+    if row:
+        return row
+    c.execute(
+        "INSERT INTO inventory(product_id,warehouse_id,on_hand,reserved,updated_at,reorder_level) VALUES (?,?,0,0,?,5)",
+        (product_id, warehouse_id, stamp or now_iso()),
+    )
+    return c.execute(
+        "SELECT * FROM inventory WHERE product_id=? AND warehouse_id=?",
+        (product_id, warehouse_id),
+    ).fetchone()
+
+
 def _simple_rows(table: str):
     with connect() as c:
         return rows(c, f"SELECT * FROM {table} ORDER BY id DESC")
@@ -304,9 +541,183 @@ def _simple_rows(table: str):
 @app.get("/api/catalog")
 def catalog():
     with connect() as c: return rows(c, "SELECT m.*, c.name category_name FROM menu_items m JOIN menu_categories c ON c.id=m.category_id ORDER BY m.id")
+@app.get("/api/warehouses")
+def warehouses():
+    with connect() as c:
+        return rows(c, "SELECT * FROM warehouses WHERE active=1 ORDER BY id")
+
+
+@app.post("/api/warehouses")
+def create_warehouse(x: WarehouseIn, request: Request):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        payload = {"code": x.code, "name": x.name}
+        existing = _idempotent_response(c, "inventory.warehouse", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        try:
+            n = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM warehouses").fetchone()[0]
+            c.execute("INSERT INTO warehouses(id,code,name,active,created_at) VALUES (?,?,?,1,?)", (n, x.code, x.name, now_iso()))
+        except sqlite3.IntegrityError:
+            fail("Warehouse code already exists", 409)
+        _audit(c, request, "inventory.warehouse_created", x.code)
+        result = dict(c.execute("SELECT * FROM warehouses WHERE id=?", (n,)).fetchone())
+        _save_idempotent_response(c, "inventory.warehouse", x.idempotency_key, payload, result)
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def _inventory_rows(c, warehouse_id=None):
+    params = () if warehouse_id is None else (warehouse_id,)
+    where = "" if warehouse_id is None else " AND i.warehouse_id=?"
+    values = rows(
+        c,
+        """
+        SELECT m.id AS product_id,m.sku,m.name,i.warehouse_id,w.code warehouse_code,
+               i.on_hand,i.reserved,(i.on_hand-i.reserved) available,
+               i.reorder_level,i.updated_at
+        FROM menu_items m JOIN inventory i ON i.product_id=m.id
+        JOIN warehouses w ON w.id=i.warehouse_id
+        WHERE m.active=1 AND w.active=1
+        """ + where + " ORDER BY w.id,m.id",
+        params,
+    )
+    for value in values:
+        value["low_stock"] = value["available"] <= value["reorder_level"]
+        value["reorder_quantity"] = max(value["reorder_level"] - value["available"], 0)
+    return values
+
+
 @app.get("/api/inventory")
-def bakuran_inventory():
-    with connect() as c: return {"products": rows(c, "SELECT m.id,m.sku,m.name,i.on_hand,i.reserved,i.updated_at FROM menu_items m JOIN inventory i ON i.product_id=m.id ORDER BY m.id"), "movements": rows(c, "SELECT * FROM stock_movements ORDER BY id DESC")}
+def bakuran_inventory(warehouse_id: int | None = Query(default=None, gt=0)):
+    with connect() as c:
+        if warehouse_id is not None:
+            _active_warehouse(c, warehouse_id)
+        movement_params = () if warehouse_id is None else (warehouse_id,)
+        movement_where = "" if warehouse_id is None else " WHERE warehouse_id=?"
+        return {
+            "products": _inventory_rows(c, warehouse_id),
+            "movements": rows(c, "SELECT * FROM stock_movements" + movement_where + " ORDER BY id DESC", movement_params),
+        }
+
+
+@app.get("/api/inventory/low-stock")
+def low_stock(warehouse_id: int | None = Query(default=None, gt=0)):
+    with connect() as c:
+        if warehouse_id is not None:
+            _active_warehouse(c, warehouse_id)
+        values = _inventory_rows(c, warehouse_id)
+        return [row for row in values if row["low_stock"]]
+
+
+@app.get("/api/inventory/reorder")
+def reorder_inventory(warehouse_id: int | None = Query(default=None, gt=0)):
+    return low_stock(warehouse_id)
+
+
+def _reorder_payload(x):
+    return {
+        "product_id": x.product_id,
+        "warehouse_id": x.warehouse_id,
+        "reorder_level": x.reorder_level,
+    }
+
+
+@app.put("/api/inventory/reorder-level")
+def update_reorder_level(x: ReorderLevelIn, request: Request):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        payload = _reorder_payload(x)
+        existing = _idempotent_response(c, "inventory.reorder_level", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        _active_product(c, x.product_id)
+        _active_warehouse(c, x.warehouse_id)
+        stamp = now_iso()
+        _ensure_inventory_row(c, x.product_id, x.warehouse_id, stamp)
+        c.execute(
+            "UPDATE inventory SET reorder_level=?,updated_at=? WHERE product_id=? AND warehouse_id=?",
+            (x.reorder_level, stamp, x.product_id, x.warehouse_id),
+        )
+        product = next(row for row in _inventory_rows(c, x.warehouse_id) if row["product_id"] == x.product_id)
+        _audit(
+            c,
+            request,
+            "inventory.reorder_level_updated",
+            f"product={x.product_id};warehouse={x.warehouse_id};reorder_level={x.reorder_level}",
+        )
+        result = {"product": product}
+        _save_idempotent_response(c, "inventory.reorder_level", x.idempotency_key, payload, result)
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+@app.post("/api/stock/adjustment")
+def stock_adjustment(x: StockAdjustmentIn, request: Request):
+    if x.quantity == 0:
+        fail("Adjustment quantity must not be zero", 422)
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        payload = {
+            "product_id": x.product_id,
+            "warehouse_id": x.warehouse_id,
+            "quantity": x.quantity,
+            "reason": x.reason,
+        }
+        existing = _idempotent_response(c, "stock.adjustment", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        _active_product(c, x.product_id)
+        _active_warehouse(c, x.warehouse_id)
+        current = _ensure_inventory_row(c, x.product_id, x.warehouse_id)
+        if current["on_hand"] + x.quantity < current["reserved"]:
+            fail("Adjustment cannot reduce stock below reserved quantity", 409)
+        stamp = now_iso()
+        c.execute(
+            "UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?",
+            (x.quantity, stamp, x.product_id, x.warehouse_id),
+        )
+        movement = c.execute(
+            "INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (x.product_id, x.warehouse_id, "adjustment", x.quantity, "manual-adjustment", x.reason, x.idempotency_key, stamp),
+        )
+        movement_id = movement.lastrowid
+        product = next(row for row in _inventory_rows(c, x.warehouse_id) if row["product_id"] == x.product_id)
+        result = {
+            "product": product,
+            "movement": dict(c.execute("SELECT * FROM stock_movements WHERE id=?", (movement_id,)).fetchone()),
+        }
+        _audit(c, request, "inventory.adjustment", f"product={x.product_id};warehouse={x.warehouse_id};quantity={x.quantity};reason={x.reason}")
+        _save_idempotent_response(c, "stock.adjustment", x.idempotency_key, payload, result)
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+@app.get("/api/audit-events")
+def audit_events():
+    with connect() as c:
+        return rows(c, "SELECT * FROM audit_events ORDER BY id DESC")
 @app.get("/api/customers")
 def bakuran_customers(): return _simple_rows("customers")
 @app.get("/api/suppliers")
@@ -340,45 +751,249 @@ def notifications(): return _simple_rows("notifications")
 def attendance(): return _simple_rows("attendance")
 @app.get("/api/purchases")
 def purchases():
-    with connect() as c: return rows(c,"SELECT p.*,s.name supplier_name FROM purchases p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC")
+    with connect() as c:
+        values = rows(c, "SELECT p.*,s.name supplier_name FROM purchases p JOIN suppliers s ON s.id=p.supplier_id ORDER BY p.id DESC")
+        for value in values:
+            value["lines"] = _purchase_lines(c, value["id"])
+        return values
+
+
+def _purchase_lines(c, purchase_id):
+    return rows(
+        c,
+        """
+        SELECT pl.*,m.sku,m.name product_name,w.code warehouse_code
+        FROM purchase_lines pl
+        JOIN menu_items m ON m.id=pl.product_id
+        JOIN warehouses w ON w.id=pl.warehouse_id
+        WHERE pl.purchase_id=?
+        ORDER BY pl.id
+        """,
+        (purchase_id,),
+    )
+
+
+def purchase_view(c, purchase_id):
+    purchase = c.execute("SELECT p.*,s.name supplier_name FROM purchases p JOIN suppliers s ON s.id=p.supplier_id WHERE p.id=?", (purchase_id,)).fetchone()
+    if not purchase:
+        fail("Purchase not found", 404)
+    return {"purchase": dict(purchase), "lines": _purchase_lines(c, purchase_id)}
+
+
+@app.get("/api/purchases/{pid}")
+def purchase_detail(pid: int):
+    with connect() as c:
+        return purchase_view(c, pid)
+
+
 @app.post("/api/purchases")
-def create_purchase(x: GenericIn):
-    c=connect()
+def create_purchase(x: PurchaseCreateIn, request: Request):
+    c = connect()
     try:
-        c.execute("BEGIN IMMEDIATE"); sid=x.supplier_id or 1
-        if not c.execute("SELECT 1 FROM suppliers WHERE id=? AND active=1",(sid,)).fetchone(): fail("Supplier not found",404)
-        n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM purchases").fetchone()[0]
-        c.execute("INSERT INTO purchases VALUES (?,?,?,'draft',0,?,NULL)",(n,f"PUR-{n:04d}",sid,now_iso())); c.commit(); return dict(c.execute("SELECT * FROM purchases WHERE id=?",(n,)).fetchone())
-    except HTTPException: c.rollback(); raise
+        c.execute("BEGIN IMMEDIATE")
+        payload = {"supplier_id": x.supplier_id}
+        existing = _idempotent_response(c, "purchasing.create", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        if not c.execute("SELECT 1 FROM suppliers WHERE id=? AND active=1", (x.supplier_id,)).fetchone():
+            fail("Supplier not found", 404)
+        n = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM purchases").fetchone()[0]
+        c.execute(
+            "INSERT INTO purchases(id,purchase_number,supplier_id,status,total,created_at) VALUES (?,?,?,'draft',0,?)",
+            (n, f"PUR-{n:04d}", x.supplier_id, now_iso()),
+        )
+        _audit(c, request, "purchasing.created", f"purchase={n}")
+        result = dict(c.execute("SELECT * FROM purchases WHERE id=?", (n,)).fetchone())
+        _save_idempotent_response(c, "purchasing.create", x.idempotency_key, payload, result)
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
     finally: c.close()
-@app.post("/api/purchases/{pid}/receive")
-def receive_purchase(pid:int):
-    c=connect()
-    try:
-        c.execute("BEGIN IMMEDIATE"); p=c.execute("SELECT * FROM purchases WHERE id=?",(pid,)).fetchone()
-        if not p: fail("Purchase not found",404)
-        if p["status"] not in ("ordered","draft"): fail("Purchase cannot be received in its current state",409)
-        lines=c.execute("SELECT * FROM purchase_lines WHERE purchase_id=?",(pid,)).fetchall()
-        if not lines: fail("Purchase requires lines",409)
-        for line in lines: c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=?",(line["quantity"],now_iso(),line["product_id"]))
-        c.execute("UPDATE purchases SET status='received',received_at=? WHERE id=?",(now_iso(),pid)); c.commit(); return dict(c.execute("SELECT * FROM purchases WHERE id=?",(pid,)).fetchone())
-    except HTTPException: c.rollback(); raise
-    finally: c.close()
-@app.post("/api/purchases/{pid}/lines")
-def purchase_line(pid: int, x: GenericIn):
+
+
+@app.post("/api/purchases/{pid}/order")
+def order_purchase(pid: int, request: Request):
     c = connect()
     try:
         c.execute("BEGIN IMMEDIATE")
         purchase = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
+        if not purchase:
+            fail("Purchase not found", 404)
+        if purchase["status"] == "ordered":
+            c.commit()
+            return dict(purchase)
+        if purchase["status"] != "draft":
+            fail("Only draft purchases can be ordered", 409)
+        if not c.execute("SELECT 1 FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone():
+            fail("Purchase requires lines", 409)
+        stamp = now_iso()
+        c.execute("UPDATE purchases SET status='ordered',ordered_at=? WHERE id=?", (stamp, pid))
+        _audit(c, request, "purchasing.ordered", f"purchase={pid}")
+        c.commit()
+        return dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+    except HTTPException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+@app.post("/api/purchases/{pid}/close")
+def close_purchase(pid: int, request: Request):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        purchase = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
+        if not purchase:
+            fail("Purchase not found", 404)
+        if purchase["status"] == "closed":
+            c.commit()
+            return dict(purchase)
+        if purchase["status"] != "received":
+            fail("Only fully received purchases can be closed", 409)
+        stamp = now_iso()
+        c.execute("UPDATE purchases SET status='closed',closed_at=? WHERE id=?", (stamp, pid))
+        _audit(c, request, "purchasing.closed", f"purchase={pid}")
+        c.commit()
+        return dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+    except HTTPException:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+@app.post("/api/purchases/{pid}/receive")
+def receive_purchase(pid: int, request: Request, x: PurchaseReceiptIn | None = Body(default=None)):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        p = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
+        if not p:
+            fail("Purchase not found", 404)
+        legacy = x is None
+        if legacy:
+            if p["status"] not in ("draft", "ordered", "partially_received"):
+                fail("Purchase must be ordered or partially received before receiving", 409)
+            outstanding = c.execute(
+                "SELECT product_id,warehouse_id,quantity-received_quantity AS quantity FROM purchase_lines WHERE purchase_id=? AND received_quantity<quantity ORDER BY id",
+                (pid,),
+            ).fetchall()
+            if not outstanding:
+                fail("Purchase has no outstanding lines", 409)
+            x = PurchaseReceiptIn(
+                lines=[
+                    PurchaseReceiptLineIn(product_id=row["product_id"], warehouse_id=row["warehouse_id"], quantity=row["quantity"])
+                    for row in outstanding
+                ]
+            )
+        payload = {
+            "purchase_id": pid,
+            "lines": sorted(
+                [{"product_id": line.product_id, "warehouse_id": line.warehouse_id, "quantity": line.quantity} for line in x.lines],
+                key=lambda line: (line["product_id"], line["warehouse_id"]),
+            ),
+            "allow_over_receipt": x.allow_over_receipt,
+            "override_reason": x.override_reason,
+        }
+        if x.allow_over_receipt:
+            if not x.override_reason:
+                fail("Override reason is required", 422)
+            _require_override_authority(request)
+        existing = _idempotent_response(c, f"purchasing.receive:{pid}", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        if p["status"] not in ("ordered", "partially_received") and not (legacy and p["status"] == "draft"):
+            fail("Purchase must be ordered or partially received before receiving", 409)
+        requested = {}
+        for receipt_line in x.lines:
+            _active_product(c, receipt_line.product_id)
+            _active_warehouse(c, receipt_line.warehouse_id)
+            key = (receipt_line.product_id, receipt_line.warehouse_id)
+            requested[key] = requested.get(key, 0) + receipt_line.quantity
+        purchase_lines = {}
+        for line in c.execute("SELECT * FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchall():
+            purchase_lines[(line["product_id"], line["warehouse_id"])] = line
+        if not purchase_lines:
+            fail("Purchase requires lines", 409)
+        if set(requested) - set(purchase_lines):
+            fail("Receipt contains a product or warehouse not on this purchase", 409)
+        for key, quantity in requested.items():
+            line = purchase_lines[key]
+            if not x.allow_over_receipt and line["received_quantity"] + quantity > line["quantity"]:
+                fail("Receipt exceeds ordered quantity", 409)
+        stamp = now_iso()
+        for (product_id, warehouse_id), quantity in requested.items():
+            line = purchase_lines[(product_id, warehouse_id)]
+            _ensure_inventory_row(c, product_id, warehouse_id, stamp)
+            c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?", (quantity, stamp, product_id, warehouse_id))
+            c.execute("UPDATE purchase_lines SET received_quantity=received_quantity+? WHERE id=?", (quantity, line["id"]))
+            c.execute("INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)", (product_id, warehouse_id, "receipt", quantity, p["purchase_number"], x.override_reason or "Purchase receipt", x.idempotency_key, stamp))
+        remaining = c.execute(
+            "SELECT 1 FROM purchase_lines WHERE purchase_id=? AND received_quantity<quantity LIMIT 1",
+            (pid,),
+        ).fetchone()
+        status = "partially_received" if remaining else "received"
+        received_at = stamp if status == "received" else p["received_at"]
+        c.execute("UPDATE purchases SET status=?,received_at=? WHERE id=?", (status, received_at, pid))
+        reason = x.override_reason or "Purchase receipt"
+        _audit(
+            c,
+            request,
+            "purchasing.receipt",
+            f"purchase={pid};quantity={sum(requested.values())};override={x.allow_over_receipt};reason={reason}",
+        )
+        if x.allow_over_receipt:
+            _audit(c, request, "purchasing.receipt_override", f"purchase={pid};reason={reason}")
+        result = purchase_view(c, pid)
+        if not legacy:
+            _save_idempotent_response(c, f"purchasing.receive:{pid}", x.idempotency_key, payload, result)
+        c.commit()
+        if legacy:
+            return dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone())
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    finally: c.close()
+
+
+@app.post("/api/purchases/{pid}/lines")
+def purchase_line(pid: int, x: PurchaseLineIn, request: Request):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        payload = {
+            "purchase_id": pid,
+            "product_id": x.product_id,
+            "warehouse_id": x.warehouse_id,
+            "quantity": x.quantity,
+            "unit_cost": x.unit_cost,
+        }
+        existing = _idempotent_response(c, f"purchasing.line:{pid}", x.idempotency_key, payload)
+        if existing is not None:
+            c.commit()
+            return existing
+        purchase = c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()
         if not purchase: fail("Purchase not found", 404)
         if purchase["status"] != "draft": fail("Only draft purchases can be edited", 409)
-        product_id = x.product_id or 1
-        product = c.execute("SELECT * FROM menu_items WHERE id=? AND active=1", (product_id,)).fetchone()
-        if not product: fail("Product not found", 404)
-        c.execute("INSERT INTO purchase_lines(purchase_id,product_id,quantity,unit_cost) VALUES(?,?,?,?)", (pid, product_id, x.quantity, x.unit_cost))
+        _active_product(c, x.product_id)
+        _active_warehouse(c, x.warehouse_id)
+        c.execute(
+            "INSERT INTO purchase_lines(purchase_id,product_id,warehouse_id,quantity,unit_cost) VALUES(?,?,?,?,?)",
+            (pid, x.product_id, x.warehouse_id, x.quantity, x.unit_cost),
+        )
         total = c.execute("SELECT COALESCE(SUM(quantity*unit_cost),0) FROM purchase_lines WHERE purchase_id=?", (pid,)).fetchone()[0]
-        c.execute("UPDATE purchases SET total=? WHERE id=?", (total, pid)); c.commit()
-        return {"purchase": dict(c.execute("SELECT * FROM purchases WHERE id=?", (pid,)).fetchone()), "lines": rows(c, "SELECT * FROM purchase_lines WHERE purchase_id=?", (pid,))}
+        c.execute("UPDATE purchases SET total=? WHERE id=?", (total, pid))
+        _audit(c, request, "purchasing.line_added", f"purchase={pid};product={x.product_id};warehouse={x.warehouse_id}")
+        result = purchase_view(c, pid)
+        _save_idempotent_response(c, f"purchasing.line:{pid}", x.idempotency_key, payload, result)
+        c.commit()
+        return result
     except sqlite3.IntegrityError:
         c.rollback(); fail("Product is already on this purchase", 409)
     except HTTPException:
@@ -389,13 +1004,27 @@ def clock(x: GenericIn):
     with connect() as c:
         c.execute("INSERT INTO attendance(employee_name,status,occurred_at) VALUES (?,?,?)",(x.name,x.value or "in",now_iso())); return dict(c.execute("SELECT * FROM attendance ORDER BY id DESC LIMIT 1").fetchone())
 @app.post("/api/stock/receipt")
-def stock_receipt(x: GenericIn):
-    c=connect()
+def stock_receipt(x: GenericIn, request: Request):
+    c = connect()
     try:
-        c.execute("BEGIN IMMEDIATE"); pid=x.product_id or 1
-        if not c.execute("SELECT 1 FROM inventory WHERE product_id=?",(pid,)).fetchone(): fail("Product not found",404)
-        c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=?",(x.quantity,now_iso(),pid)); c.execute("INSERT INTO stock_movements(product_id,movement_type,quantity,reference,created_at) VALUES(?,?,?,?,?)",(pid,'receipt',x.quantity,x.value or 'manual',now_iso())); c.commit(); return {"product_id":pid,"quantity":x.quantity}
-    except HTTPException: c.rollback(); raise
+        c.execute("BEGIN IMMEDIATE")
+        product_id = x.product_id or 1
+        warehouse_id = 1
+        _active_product(c, product_id)
+        _active_warehouse(c, warehouse_id)
+        stamp = now_iso()
+        _ensure_inventory_row(c, product_id, warehouse_id, stamp)
+        c.execute("UPDATE inventory SET on_hand=on_hand+?,updated_at=? WHERE product_id=? AND warehouse_id=?", (x.quantity, stamp, product_id, warehouse_id))
+        c.execute(
+            "INSERT INTO stock_movements(product_id,warehouse_id,movement_type,quantity,reference,reason,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (product_id, warehouse_id, "receipt", x.quantity, x.value or "manual", "Legacy stock receipt", None, stamp),
+        )
+        _audit(c, request, "inventory.receipt_legacy", f"product={product_id};warehouse={warehouse_id};quantity={x.quantity}")
+        c.commit()
+        return {"product_id": product_id, "quantity": x.quantity}
+    except HTTPException:
+        c.rollback()
+        raise
     finally: c.close()
 
 # Stable workflow-oriented aliases used by the composite frontend and API clients.
