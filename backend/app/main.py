@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+import hashlib
+import json
 import sqlite3
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 from .db import connect, initialize
-from .auth import AUTH_ALLOWED_ORIGINS, AuthMiddleware, initialize_auth, router as auth_router
+from .auth import (
+    AUTH_ALLOWED_ORIGINS,
+    AuthMiddleware,
+    initialize_auth,
+    record_event_in_connection,
+    router as auth_router,
+)
 
 try:
     from .generated_metadata import EXPORT_STATUS, FRONTEND_TEMPLATE, PROJECT_NAME, TARGET_STACK
@@ -53,9 +61,74 @@ class OrderStartIn(BaseModel):
     @classmethod
     def order_channel_valid(cls, value):
         value = value.strip().lower()
-        if value not in {"table", "qr", "counter"}:
-            raise ValueError("order_channel must be table, qr, or counter")
+        if value not in {"table", "qr", "counter", "delivery"}:
+            raise ValueError("order_channel must be table, qr, counter, or delivery")
         return value
+
+
+class DeliveryMetadataIn(BaseModel):
+    address: str = Field(min_length=5, max_length=240)
+    contact: str = Field(min_length=7, max_length=40)
+    contact_name: str = Field(default="", max_length=80)
+
+    @field_validator("address")
+    @classmethod
+    def address_normalized(cls, value):
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("value is too short")
+        return value
+
+    @field_validator("contact")
+    @classmethod
+    def contact_normalized(cls, value):
+        value = value.strip()
+        if len(value) < 7:
+            raise ValueError("value is too short")
+        return value
+
+    @field_validator("contact")
+    @classmethod
+    def contact_valid(cls, value):
+        if not any(character.isdigit() for character in value) or not all(character.isdigit() or character in "+- ()" for character in value):
+            raise ValueError("contact must contain a phone number")
+        return value
+
+    @field_validator("contact_name")
+    @classmethod
+    def contact_name_normalized(cls, value):
+        return value.strip()
+
+
+class DeliveryAssignmentIn(BaseModel):
+    driver_id: int = Field(gt=0)
+
+
+class DeliveryTransitionIn(BaseModel):
+    reason: str = Field(default="", max_length=240)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_normalized(cls, value):
+        return value.strip()
+
+
+class DeliveryCallbackIn(DeliveryTransitionIn):
+    status: str = Field(min_length=1, max_length=32)
+    callback_id: str = Field(min_length=1, max_length=160)
+
+    @field_validator("status")
+    @classmethod
+    def callback_status_valid(cls, value):
+        value = value.strip().lower()
+        if value not in {"out_for_delivery", "delivered", "failed", "cancelled"}:
+            raise ValueError("callback status must be out_for_delivery, delivered, failed, or cancelled")
+        return value
+
+    @field_validator("callback_id")
+    @classmethod
+    def callback_id_normalized(cls, value):
+        return value.strip()
 
 def rows(c, sql, params=()): return [dict(x) for x in c.execute(sql, params).fetchall()]
 def fail(message, status=400): raise HTTPException(status_code=status, detail=message)
@@ -63,9 +136,126 @@ def get(c, table, ident):
     row = c.execute(f"SELECT * FROM {table} WHERE id=?", (ident,)).fetchone()
     if not row: fail(f"{table.replace('_',' ').title()} not found", 404)
     return row
+
+
+def _actor_user_id(request: Request) -> int | None:
+    user = getattr(request.state, "auth_user", None)
+    return user.get("id") if user else None
+
+
+def _delivery_audit(c, request: Request, event_type: str, detail: str = "") -> None:
+    record_event_in_connection(c, _actor_user_id(request), event_type, request.url.path, detail)
+
+
+def _delivery_record(c, delivery_id: int):
+    row = c.execute(
+        """
+        SELECT d.*, o.order_number, o.customer_name, o.total AS order_total,
+               o.status AS order_status, o.order_channel
+        FROM delivery_orders d
+        JOIN restaurant_orders o ON o.id = d.order_id
+        WHERE d.id = ?
+        """,
+        (delivery_id,),
+    ).fetchone()
+    if not row:
+        fail("Delivery order not found", 404)
+    delivery = dict(row)
+    driver = c.execute(
+        "SELECT id, code, name, contact, active FROM delivery_drivers WHERE id = ?",
+        (delivery["driver_id"],),
+    ).fetchone() if delivery["driver_id"] else None
+    delivery["driver"] = dict(driver) if driver else None
+    delivery["assignments"] = rows(
+        c,
+        """
+        SELECT a.id, a.delivery_id, a.driver_id, a.status, a.assigned_at,
+               a.unassigned_at, d.code AS driver_code, d.name AS driver_name,
+               d.contact AS driver_contact
+        FROM delivery_assignments a
+        JOIN delivery_drivers d ON d.id = a.driver_id
+        WHERE a.delivery_id = ?
+        ORDER BY a.id
+        """,
+        (delivery_id,),
+    )
+    return delivery
+
+
+def delivery_view(c, delivery_id: int):
+    return {"delivery": _delivery_record(c, delivery_id)}
+
+
+def _delivery_for_order(c, order_id: int):
+    row = c.execute("SELECT id FROM delivery_orders WHERE order_id = ?", (order_id,)).fetchone()
+    return _delivery_record(c, row["id"]) if row else None
+
+
+def _idempotency_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    if len(value) > 160:
+        fail("Idempotency-Key is too long", 422)
+    return value
+
+
+def _request_hash(payload: dict) -> str:
+    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _idempotency_replay(c, delivery_id: int, operation: str, key: str | None, request_hash: str):
+    if not key:
+        return None
+    row = c.execute(
+        """
+        SELECT request_hash, response_json
+        FROM delivery_idempotency_keys
+        WHERE delivery_id = ? AND operation = ? AND idempotency_key = ?
+        """,
+        (delivery_id, operation, key),
+    ).fetchone()
+    if not row:
+        return None
+    if row["request_hash"] != request_hash:
+        fail("Idempotency-Key was already used with a different request", 409)
+    return json.loads(row["response_json"])
+
+
+def _idempotency_store(c, delivery_id: int, operation: str, key: str | None, request_hash: str, response: dict) -> None:
+    if not key:
+        return
+    c.execute(
+        """
+        INSERT INTO delivery_idempotency_keys
+            (delivery_id, operation, idempotency_key, request_hash, response_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (delivery_id, operation, key, request_hash, json.dumps(response, sort_keys=True), now_iso()),
+    )
+
+
+def _delivery_payment_required(c, delivery_id: int):
+    delivery = get(c, "delivery_orders", delivery_id)
+    order = get(c, "restaurant_orders", delivery["order_id"])
+    if order["order_channel"] != "delivery":
+        fail("Delivery metadata belongs to a non-delivery order", 409)
+    if not c.execute("SELECT 1 FROM payments WHERE order_id = ? AND status = 'paid'", (order["id"],)).fetchone():
+        fail("Cash payment is required before delivery assignment", 409)
+    return delivery, order
 def order_view(c, oid):
     o = get(c, "restaurant_orders", oid)
-    return {"order": dict(o), "lines": rows(c, "SELECT * FROM restaurant_order_lines WHERE order_id=? ORDER BY id", (oid,)), "ticket": next(iter(rows(c, "SELECT * FROM kitchen_tickets WHERE order_id=?", (oid,))), None), "payment": next(iter(rows(c, "SELECT * FROM payments WHERE order_id=?", (oid,))), None), "receipt": next(iter(rows(c, "SELECT * FROM receipts WHERE order_id=?", (oid,))), None)}
+    return {
+        "order": dict(o),
+        "lines": rows(c, "SELECT * FROM restaurant_order_lines WHERE order_id=? ORDER BY id", (oid,)),
+        "ticket": next(iter(rows(c, "SELECT * FROM kitchen_tickets WHERE order_id=?", (oid,))), None),
+        "payment": next(iter(rows(c, "SELECT * FROM payments WHERE order_id=?", (oid,))), None),
+        "receipt": next(iter(rows(c, "SELECT * FROM receipts WHERE order_id=?", (oid,))), None),
+        "delivery": _delivery_for_order(c, oid),
+    }
 def table_view(c, table_id):
     t = dict(get(c, "dining_tables", table_id)); s = c.execute("SELECT * FROM table_sessions WHERE table_id=? AND status='open'", (table_id,)).fetchone(); t["session"] = dict(s) if s else None
     if s: t["order"] = next(iter(rows(c, "SELECT * FROM restaurant_orders WHERE session_id=? AND status!='closed'", (s["id"],))), None)
@@ -94,7 +284,10 @@ def transition(ticket_id, expected, target, column):
 def health():
     try:
         with connect() as c:
-            required = {"schema_migrations", "dining_tables", "menu_items", "table_sessions", "restaurant_orders", "receipts"}
+            required = {
+                "schema_migrations", "dining_tables", "menu_items", "table_sessions", "restaurant_orders", "receipts",
+                "audit_events", "delivery_drivers", "delivery_orders", "delivery_assignments", "delivery_idempotency_keys",
+            }
             available = {row["name"] for row in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             missing = sorted(required - available)
             if missing:
@@ -118,6 +311,359 @@ def orders():
 @app.get("/api/orders/{oid}")
 def order_detail(oid: int):
     with connect() as c: return order_view(c, oid)
+
+
+@app.post("/api/orders/{oid}/delivery")
+def save_delivery_metadata(oid: int, x: DeliveryMetadataIn, request: Request):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        order = get(c, "restaurant_orders", oid)
+        if order["order_channel"] != "delivery":
+            fail("Only delivery orders can have delivery metadata", 409)
+        if order["status"] not in {"open", "awaiting_payment"}:
+            fail("Delivery metadata cannot be changed after payment", 409)
+        existing = c.execute("SELECT id FROM delivery_orders WHERE order_id = ?", (oid,)).fetchone()
+        stamp = now_iso()
+        if existing:
+            delivery_id = existing["id"]
+            c.execute(
+                """
+                UPDATE delivery_orders
+                SET address = ?, contact = ?, contact_name = ?, updated_at = ?
+                WHERE id = ? AND order_id = ?
+                """,
+                (x.address, x.contact, x.contact_name, stamp, delivery_id, oid),
+            )
+            _delivery_audit(c, request, "delivery.metadata_updated", f"delivery_id={delivery_id} order_id={oid}")
+        else:
+            cursor = c.execute(
+                """
+                INSERT INTO delivery_orders
+                    (order_id, address, contact, contact_name, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'pending', ?, ?)
+                """,
+                (oid, x.address, x.contact, x.contact_name, stamp, stamp),
+            )
+            delivery_id = cursor.lastrowid
+            _delivery_audit(c, request, "delivery.created", f"delivery_id={delivery_id} order_id={oid}")
+        c.commit()
+        return order_view(c, oid)
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as error:
+        c.rollback()
+        fail(f"Delivery metadata could not be saved: {error}", 409)
+    finally:
+        c.close()
+
+
+@app.get("/api/delivery/drivers")
+def delivery_drivers():
+    with connect() as c:
+        return rows(
+            c,
+            """
+            SELECT id, code, name, contact, active, created_at
+            FROM delivery_drivers
+            WHERE active = 1
+            ORDER BY name, id
+            """,
+        )
+
+
+@app.get("/api/delivery")
+def delivery_board(status: str | None = Query(default=None)):
+    if status is not None and status not in {"pending", "assigned", "out_for_delivery", "delivered", "failed", "cancelled"}:
+        fail("Unknown delivery status", 422)
+    with connect() as c:
+        if status is None:
+            delivery_ids = rows(
+                c,
+                """
+                SELECT d.id
+                FROM delivery_orders d
+                JOIN restaurant_orders o ON o.id = d.order_id
+                WHERE EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'paid')
+                ORDER BY d.updated_at DESC, d.id DESC
+                """,
+            )
+        else:
+            delivery_ids = rows(
+                c,
+                """
+                SELECT d.id
+                FROM delivery_orders d
+                JOIN restaurant_orders o ON o.id = d.order_id
+                WHERE d.status = ?
+                  AND EXISTS (SELECT 1 FROM payments p WHERE p.order_id = o.id AND p.status = 'paid')
+                ORDER BY d.updated_at DESC, d.id DESC
+                """,
+                (status,),
+            )
+        return [_delivery_record(c, value["id"]) for value in delivery_ids]
+
+
+@app.get("/api/delivery/{delivery_id}")
+def delivery_detail(delivery_id: int):
+    with connect() as c:
+        return delivery_view(c, delivery_id)
+
+
+@app.post("/api/delivery/{delivery_id}/assign")
+def assign_delivery(
+    delivery_id: int,
+    x: DeliveryAssignmentIn,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        delivery = get(c, "delivery_orders", delivery_id)
+        key = _idempotency_key(idempotency_key)
+        request_hash = _request_hash({"driver_id": x.driver_id})
+        replay = _idempotency_replay(c, delivery_id, "assign", key, request_hash)
+        if replay is not None:
+            c.commit()
+            return replay
+        delivery, _order = _delivery_payment_required(c, delivery_id)
+        if delivery["status"] not in {"pending", "assigned"}:
+            fail(f"Delivery cannot be assigned from {delivery['status']}", 409)
+        driver = c.execute("SELECT * FROM delivery_drivers WHERE id = ? AND active = 1", (x.driver_id,)).fetchone()
+        if not driver:
+            fail("Active delivery driver not found", 404)
+        active_assignment = c.execute(
+            "SELECT * FROM delivery_assignments WHERE delivery_id = ? AND status = 'active'",
+            (delivery_id,),
+        ).fetchone()
+        if delivery["status"] == "assigned" and delivery["driver_id"] == x.driver_id and active_assignment:
+            response = delivery_view(c, delivery_id)
+            _idempotency_store(c, delivery_id, "assign", key, request_hash, response)
+            c.commit()
+            return response
+
+        stamp = now_iso()
+        previous_driver_id = active_assignment["driver_id"] if active_assignment else delivery["driver_id"]
+        if active_assignment:
+            c.execute(
+                "UPDATE delivery_assignments SET status = 'reassigned', unassigned_at = ? WHERE id = ? AND status = 'active'",
+                (stamp, active_assignment["id"]),
+            )
+        c.execute(
+            "INSERT INTO delivery_assignments(delivery_id, driver_id, status, assigned_at) VALUES (?, ?, 'active', ?)",
+            (delivery_id, x.driver_id, stamp),
+        )
+        c.execute(
+            """
+            UPDATE delivery_orders
+            SET status = 'assigned', driver_id = ?, assigned_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (x.driver_id, stamp, stamp, delivery_id),
+        )
+        event_type = "delivery.reassigned" if previous_driver_id and previous_driver_id != x.driver_id else "delivery.assigned"
+        _delivery_audit(c, request, event_type, f"delivery_id={delivery_id} driver_id={x.driver_id}")
+        response = delivery_view(c, delivery_id)
+        _idempotency_store(c, delivery_id, "assign", key, request_hash, response)
+        c.commit()
+        return response
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as error:
+        c.rollback()
+        fail(f"Delivery assignment conflict: {error}", 409)
+    finally:
+        c.close()
+
+
+def _transition_delivery(
+    delivery_id: int,
+    target: str,
+    request: Request,
+    *,
+    reason: str = "",
+    operation: str,
+    idempotency_key: str | None = None,
+    request_payload: dict | None = None,
+):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        delivery = get(c, "delivery_orders", delivery_id)
+        key = _idempotency_key(idempotency_key)
+        request_hash = _request_hash(request_payload or {"status": target, "reason": reason})
+        replay = _idempotency_replay(c, delivery_id, operation, key, request_hash)
+        if replay is not None:
+            c.commit()
+            return replay
+        delivery, _order = _delivery_payment_required(c, delivery_id)
+        current = delivery["status"]
+        if target in {"out_for_delivery", "delivered"} and current == target:
+            response = delivery_view(c, delivery_id)
+            _idempotency_store(c, delivery_id, operation, key, request_hash, response)
+            c.commit()
+            return response
+        if target in {"failed", "cancelled"} and not reason:
+            fail(f"A reason is required to mark a delivery {target}", 422)
+        allowed = {
+            "out_for_delivery": {"assigned"},
+            "delivered": {"out_for_delivery"},
+            "failed": {"pending", "assigned", "out_for_delivery"},
+            "cancelled": {"pending", "assigned", "out_for_delivery"},
+        }[target]
+        if current not in allowed:
+            fail(f"Delivery must be {', '.join(sorted(allowed))} before {target}; current status is {current}", 409)
+        if target in {"out_for_delivery", "delivered"} and not c.execute(
+            "SELECT 1 FROM delivery_assignments WHERE delivery_id = ? AND status = 'active'", (delivery_id,)
+        ).fetchone():
+            fail("Delivery has no active driver assignment", 409)
+
+        stamp = now_iso()
+        updates = ["status = ?", "updated_at = ?"]
+        params: list = [target, stamp]
+        event_type = f"delivery.{target}"
+        if target == "out_for_delivery":
+            updates.append("out_for_delivery_at = ?")
+            params.append(stamp)
+        elif target == "delivered":
+            updates.append("delivered_at = ?")
+            params.append(stamp)
+        elif target == "failed":
+            updates.append("failure_reason = ?")
+            params.append(reason)
+            updates.append("failed_at = ?")
+            params.append(stamp)
+        else:
+            updates.append("cancellation_reason = ?")
+            params.append(reason)
+            updates.append("cancelled_at = ?")
+            params.append(stamp)
+        params.append(delivery_id)
+        c.execute(f"UPDATE delivery_orders SET {', '.join(updates)} WHERE id = ?", params)
+        assignment_status = {"delivered": "completed", "failed": "failed", "cancelled": "cancelled"}.get(target)
+        if assignment_status:
+            c.execute(
+                "UPDATE delivery_assignments SET status = ?, unassigned_at = ? WHERE delivery_id = ? AND status = 'active'",
+                (assignment_status, stamp, delivery_id),
+            )
+        _delivery_audit(c, request, event_type, f"delivery_id={delivery_id}")
+        response = delivery_view(c, delivery_id)
+        _idempotency_store(c, delivery_id, operation, key, request_hash, response)
+        c.commit()
+        return response
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as error:
+        c.rollback()
+        fail(f"Delivery transition conflict: {error}", 409)
+    finally:
+        c.close()
+
+
+@app.post("/api/delivery/{delivery_id}/out-for-delivery")
+def out_for_delivery(
+    delivery_id: int,
+    request: Request,
+    x: DeliveryTransitionIn | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    return _transition_delivery(
+        delivery_id,
+        "out_for_delivery",
+        request,
+        operation="out_for_delivery",
+        idempotency_key=idempotency_key,
+        request_payload={"status": "out_for_delivery"},
+    )
+
+
+@app.post("/api/delivery/{delivery_id}/delivered")
+def delivered(
+    delivery_id: int,
+    request: Request,
+    x: DeliveryTransitionIn | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    return _transition_delivery(
+        delivery_id,
+        "delivered",
+        request,
+        operation="delivered",
+        idempotency_key=idempotency_key,
+        request_payload={"status": "delivered"},
+    )
+
+
+@app.post("/api/delivery/{delivery_id}/failed")
+def failed(
+    delivery_id: int,
+    request: Request,
+    x: DeliveryTransitionIn | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    reason = x.reason if x else ""
+    return _transition_delivery(
+        delivery_id,
+        "failed",
+        request,
+        reason=reason,
+        operation="failed",
+        idempotency_key=idempotency_key,
+        request_payload={"status": "failed", "reason": reason},
+    )
+
+
+@app.post("/api/delivery/{delivery_id}/cancel")
+def cancel_delivery(
+    delivery_id: int,
+    request: Request,
+    x: DeliveryTransitionIn | None = None,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    reason = x.reason if x else ""
+    return _transition_delivery(
+        delivery_id,
+        "cancelled",
+        request,
+        reason=reason,
+        operation="cancelled",
+        idempotency_key=idempotency_key,
+        request_payload={"status": "cancelled", "reason": reason},
+    )
+
+
+@app.post("/api/delivery/{delivery_id}/callback")
+def delivery_callback(delivery_id: int, x: DeliveryCallbackIn, request: Request):
+    return _transition_delivery(
+        delivery_id,
+        x.status,
+        request,
+        reason=x.reason,
+        operation="callback",
+        idempotency_key=x.callback_id,
+        request_payload={"status": x.status, "reason": x.reason, "callback_id": x.callback_id},
+    )
+
+
+@app.get("/api/audit-events")
+def audit_events(limit: int = Query(default=200, ge=1, le=1000)):
+    with connect() as c:
+        return rows(
+            c,
+            """
+            SELECT id, actor_user_id, event_type, path, detail, created_at
+            FROM audit_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+
 @app.get("/api/kitchen")
 def kitchen(queue: str = Query("active", pattern="^(active|ready)$")):
     if queue == "ready":
@@ -163,7 +709,7 @@ def create_counter_order(x: OrderStartIn | None = None):
         stamp = now_iso()
         c.execute("INSERT INTO table_sessions(id,session_number,table_id,status,opened_at,closed_at) VALUES(?,?,?,'counter',?,NULL)", (session_id, f"SES-{session_id:04d}", counter["id"], stamp))
         order_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM restaurant_orders").fetchone()[0]
-        c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel) VALUES(?,?,?,'open',0,0,?,NULL,NULL,NULL,NULL,?,'counter')", (order_id, f"ORD-{order_id:04d}", session_id, stamp, (x.customer_name.strip() if x else "")))
+        c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel) VALUES(?,?,?,'open',0,0,?,NULL,NULL,NULL,NULL,?,?)", (order_id, f"ORD-{order_id:04d}", session_id, stamp, (x.customer_name.strip() if x else ""), (x.order_channel if x else "counter")))
         c.commit()
         return order_view(c, order_id)
     except HTTPException:
@@ -173,7 +719,7 @@ def create_counter_order(x: OrderStartIn | None = None):
         c.close()
 
 @app.post("/api/orders/{oid}/confirm")
-def confirm_order(oid: int, x: OrderConfirmIn):
+def confirm_order(oid: int, x: OrderConfirmIn, request: Request):
     c = connect()
     try:
         c.execute("BEGIN IMMEDIATE")
@@ -182,6 +728,10 @@ def confirm_order(oid: int, x: OrderConfirmIn):
             fail("Only open orders can be confirmed", 409)
         if not c.execute("SELECT 1 FROM restaurant_order_lines WHERE order_id=?", (oid,)).fetchone():
             fail("Cannot confirm an empty order", 409)
+        if o["order_channel"] == "delivery" and not c.execute(
+            "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
+        ).fetchone():
+            fail("Delivery address and contact are required before confirmation", 422)
         c.execute("UPDATE restaurant_orders SET customer_name=?,status='awaiting_payment' WHERE id=?", (x.customer_name.strip(), oid))
         c.commit()
         return order_view(c, oid)
@@ -250,9 +800,15 @@ def pay(oid:int,x:PaymentIn):
     c=connect()
     try:
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
+        if o["order_channel"] == "delivery" and x.method != "cash":
+            fail("Delivery orders accept cash payment only", 409)
         if o["status"]=="paid": c.commit(); return order_view(c, oid)
         if o["status"] != "awaiting_payment": fail("Order must be awaiting payment before payment",409)
         if abs(x.amount-o["total"])>0.001: fail("Payment amount must equal order total",409)
+        if o["order_channel"] == "delivery" and not c.execute(
+            "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
+        ).fetchone():
+            fail("Delivery address and contact are required before payment", 422)
         stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,x.amount,x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
         if o["status"] == "awaiting_payment":
             create_ticket(c, oid, stamp)

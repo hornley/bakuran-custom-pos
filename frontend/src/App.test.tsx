@@ -98,6 +98,49 @@ describe("counter operational flows", () => {
     await act(async () => root.unmount());
   });
 
+  it("preserves default and idempotency headers for delivery mutations", async () => {
+    Object.defineProperty(document, "cookie", { configurable: true, value: "local_csrf=test-token" });
+    const delivery = {
+      id: 7,
+      order_number: "ORD-0007",
+      contact_name: "Mika",
+      customer_name: "Mika",
+      address: "12 Mabini Street, Cebu City",
+      contact: "09171234567",
+      order_total: 18,
+      status: "assigned",
+      driver_id: 1,
+      driver: { name: "Ari Santos" },
+      assignments: [{ id: 1, driver_name: "Ari Santos", status: "active" }],
+    };
+    const requests: Array<{ url: string; options?: RequestInit }> = [];
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      requests.push({ url, options });
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/delivery")) return response([delivery]);
+      if (url.endsWith("/api/delivery/drivers")) return response([{ id: 1, name: "Ari Santos" }]);
+      return response(url.endsWith("/out-for-delivery") ? {} : [delivery]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => { button(container, "Delivery").click(); });
+    await settle();
+    await act(async () => { button(container, "Out for delivery").click(); });
+    await settle();
+
+    const mutation = requests.find(({ url }) => url.endsWith("/api/delivery/7/out-for-delivery"));
+    expect(mutation?.options).toEqual(expect.objectContaining({
+      credentials: "include",
+      headers: {
+        "X-CSRF-Token": "test-token",
+        "Content-Type": "application/json",
+        "Idempotency-Key": "desk-out-for-delivery-7-",
+      },
+    }));
+    await act(async () => root.unmount());
+    Object.defineProperty(document, "cookie", { configurable: true, value: "" });
+  });
+
   it("shows a recoverable API error without losing the order UI", async () => {
     let fail = true;
     const fetchMock = vi.fn((url: string) => {
@@ -114,6 +157,65 @@ describe("counter operational flows", () => {
     await settle();
     expect(container.textContent).toContain("Kitchen temporarily unavailable");
     expect(container.textContent).toContain("Choose items");
+    await act(async () => root.unmount());
+  });
+
+  it("clears previous delivery details when starting a new delivery", async () => {
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
+    let createdOrders = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/delivery")) return response([]);
+      if (url.endsWith("/api/delivery/drivers")) return response([]);
+      if (url.endsWith("/api/counter/orders")) {
+        createdOrders += 1;
+        const created = { ...order, id: createdOrders, order_number: `BK-00${createdOrders}`, order_channel: "delivery" };
+        return response({ order: created, lines: [], delivery: null });
+      }
+      if (url.endsWith("/lines")) {
+        const orderId = Number(url.split("/api/orders/")[1].split("/")[0]);
+        const current = { ...order, id: orderId, order_number: `BK-00${orderId}`, order_channel: "delivery", total: 12, lines: [line] };
+        return response({ order: current, lines: [line], delivery: null });
+      }
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    const setField = async (selector: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement>(selector)!;
+      await act(async () => {
+        setInputValue?.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+
+    await act(async () => button(container, "Delivery").click());
+    await settle();
+    await act(async () => button(container, "New delivery").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => button(container, "Review order").click());
+    await settle();
+    await setField("#customer-name", "Mika");
+    await setField("#delivery-address", "12 Mabini Street, Cebu City");
+    await setField("#delivery-contact", "09171234567");
+    await setField("#delivery-contact-name", "Mika");
+
+    await act(async () => button(container, "Back to order type").click());
+    await act(async () => button(container, "Delivery").click());
+    await settle();
+    await act(async () => button(container, "New delivery").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => button(container, "Review order").click());
+    await settle();
+
+    expect(container.querySelector<HTMLInputElement>("#customer-name")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-address")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-contact")!.value).toBe("");
+    expect(container.querySelector<HTMLInputElement>("#delivery-contact-name")!.value).toBe("");
     await act(async () => root.unmount());
   });
 });
