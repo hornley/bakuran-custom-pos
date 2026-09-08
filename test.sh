@@ -16,6 +16,7 @@ printf '%s\n' 'Running backend tests with an isolated pytest database...'
 printf '%s\n' 'Building the frontend...'
 (
   cd "$ROOT_DIR/frontend"
+  npm test -- --run
   npm run build
 )
 
