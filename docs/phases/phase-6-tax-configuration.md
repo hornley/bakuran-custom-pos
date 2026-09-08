@@ -2,7 +2,8 @@
 
 **Status:** Implementation complete; developer approval is required before merge.
 **Branch:** `feat/tax-configuration`
-**Base:** `57fe8f3` (`origin/main`)
+**Original base:** `57fe8f3` (`origin/main` before PR #4/#5)
+**Reconciled base:** `cd15a96` (`origin/main` after delivery and customer QR merges)
 
 ## Purpose
 
@@ -55,13 +56,12 @@ The current deployment remains single-store; tenant isolation is not being claim
 
 ## Verification
 
-To be recorded before handoff:
-
-- focused tax backend tests (`28 passed`);
-- full `./test.sh` with isolated temporary databases (`45 passed`);
-- frontend tests (`5 passed`), TypeScript/Vite production build;
-- `git diff --check`;
-- independent exact-SHA reviewer verdict and GitHub review URL.
+- Focused tax/QR/delivery backend tests: `59 passed`.
+- Full `./test.sh`: `86 passed` backend, `14 passed` frontend tests in 3 files, and production build passed.
+- Frontend dependency setup: `npm ci` installed the checked-in `@testing-library/react` dependency into the isolated worktree.
+- `git diff --check` passed.
+- Fresh isolated migration smoke check passed with versions `1, 2, 3, 4, 5, 7`; health, tax configuration, and delivery routes returned HTTP 200.
+- No live browser/E2E or external courier integration was exercised.
 
 ## Approval gate
 

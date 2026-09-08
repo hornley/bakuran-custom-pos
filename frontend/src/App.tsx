@@ -4,7 +4,9 @@ import { csrfHeaders } from "./auth";
 
 type Row = Record<string, any>;
 type Step = "build" | "confirm" | "payment" | "fulfillment";
-type View = "order" | "payments" | "kitchen" | "ready" | "operations";
+type View = "order" | "payments" | "kitchen" | "ready" | "delivery" | "operations";
+type DeliveryAction = "assign" | "out-for-delivery" | "delivered" | "failed" | "cancel";
+type OrderMode = "manual" | "qr" | "delivery" | null;
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5300";
 const PROJECT_NAME = "Bakuran POS";
@@ -17,9 +19,9 @@ const steps: Array<[Step, string]> = [
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
     credentials: "include",
     headers: { ...csrfHeaders(), "Content-Type": "application/json", ...(options?.headers || {}) },
-    ...options,
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || body.message || "The request could not be completed.");
@@ -60,11 +62,14 @@ export default function App() {
   const [menu, setMenu] = useState<Row[]>([]);
   const [currentOrder, setCurrentOrder] = useState<Row | null>(null);
   const [completedReceipt, setCompletedReceipt] = useState<Row | null>(null);
-  const [orderMode, setOrderMode] = useState<"manual" | "qr" | null>(null);
+  const [orderMode, setOrderMode] = useState<OrderMode>(null);
   const [showEntryChoice, setShowEntryChoice] = useState(true);
   const [step, setStep] = useState<Step>("build");
   const [view, setView] = useState<View>("order");
   const [customerName, setCustomerName] = useState("");
+  const [deliveryAddress, setDeliveryAddress] = useState("");
+  const [deliveryContact, setDeliveryContact] = useState("");
+  const [deliveryContactName, setDeliveryContactName] = useState("");
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [secondaryLoading, setSecondaryLoading] = useState(false);
@@ -91,8 +96,14 @@ export default function App() {
       payment: payload.payment || null,
       receipt: payload.receipt || null,
       tax: payload.tax || null,
+      delivery: payload.delivery || null,
     });
     if (payload.order.customer_name) setCustomerName(payload.order.customer_name);
+    if (payload.delivery) {
+      setDeliveryAddress(payload.delivery.address || "");
+      setDeliveryContact(payload.delivery.contact || "");
+      setDeliveryContactName(payload.delivery.contact_name || "");
+    }
   }
 
   async function loadMenu() {
@@ -138,6 +149,30 @@ export default function App() {
     }
   }
 
+  async function startDeliveryOrder() {
+    try {
+      setBusy("delivery-start");
+      setError("");
+      setNotice("");
+      setCustomerName("");
+      setDeliveryAddress("");
+      setDeliveryContact("");
+      setDeliveryContactName("");
+      setQuantities({});
+      const payload = await api<Row>("/api/counter/orders", { method: "POST", body: JSON.stringify({ order_channel: "delivery" }) });
+      applyOrderPayload(payload);
+      setOrderMode("delivery");
+      setCompletedReceipt(null);
+      setShowEntryChoice(false);
+      setStep("build");
+      setView("order");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not start a delivery order.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function addItem(item: Row) {
     const key = `add-${item.id}`;
     try {
@@ -162,6 +197,13 @@ export default function App() {
     try {
       setBusy("confirm");
       setError("");
+      if (orderMode === "delivery") {
+        const metadata = await api<Row>(`/api/orders/${currentOrder.id}/delivery`, {
+          method: "POST",
+          body: JSON.stringify({ address: deliveryAddress.trim(), contact: deliveryContact.trim(), contact_name: deliveryContactName.trim() }),
+        });
+        applyOrderPayload(metadata);
+      }
       const payload = await api<Row>(`/api/orders/${currentOrder.id}/confirm`, {
         method: "POST",
         body: JSON.stringify({ customer_name: customerName.trim() }),
@@ -188,7 +230,12 @@ export default function App() {
       });
       applyOrderPayload(payload);
       setStep("fulfillment");
-      setView("order");
+      if (orderMode === "delivery") {
+        setView("delivery");
+        void loadSecondary("delivery");
+      } else {
+        setView("order");
+      }
       setNotice("Payment recorded. The order is in the kitchen.");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not record payment.");
@@ -236,6 +283,9 @@ export default function App() {
     setOrderMode(null);
     setShowEntryChoice(true);
     setCustomerName("");
+    setDeliveryAddress("");
+    setDeliveryContact("");
+    setDeliveryContactName("");
     setQuantities({});
     setStep("build");
     setView("order");
@@ -259,11 +309,17 @@ export default function App() {
         ? `/api/payment-queue${search ? `?q=${encodeURIComponent(search)}` : ""}`
         : target === "operations"
           ? "/api/tables"
+          : target === "delivery"
+            ? "/api/delivery"
           : target === "ready"
             ? "/api/kitchen?queue=ready"
             : "/api/kitchen";
       const values = await api<Row[]>(path);
       setSecondary((current) => ({ ...current, [target]: values }));
+      if (target === "delivery") {
+        const drivers = await api<Row[]>("/api/delivery/drivers");
+        setSecondary((current) => ({ ...current, deliveryDrivers: drivers }));
+      }
       if (target === "operations") {
         const receipts = await api<Row[]>("/api/receipts");
         const taxConfiguration = await api<Row>("/api/tax/configuration");
@@ -294,6 +350,32 @@ export default function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not save the tax rule.");
       return false;
+    }
+  }
+
+  async function mutateDelivery(
+    deliveryId: number,
+    action: DeliveryAction,
+    body: Row = {},
+  ) {
+    const busyKey = `delivery-${deliveryId}-${action}`;
+    const idempotencyKey = `desk-${action}-${deliveryId}-${body.driver_id || ""}`;
+    const reason = body.reason || "";
+    try {
+      setBusy(busyKey);
+      setError("");
+      const path = action === "assign"
+        ? `/api/delivery/${deliveryId}/assign`
+        : `/api/delivery/${deliveryId}/${action}`;
+      await api<Row>(path, {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(action === "failed" || action === "cancel" ? { reason } : body),
+      });
+      await loadSecondary("delivery");
+      setNotice(`Delivery ${label(action)}.`);
+    } catch (reasonValue) {
+      setError(reasonValue instanceof Error ? reasonValue.message : "Could not update the delivery.");
     } finally {
       setBusy("");
     }
@@ -304,7 +386,7 @@ export default function App() {
       setError("");
       const payload = await refreshOrder(order.id || order.order_id);
       const isPaymentQueue = view === "payments";
-      setOrderMode(isPaymentQueue ? "qr" : payload.order.order_channel === "qr" ? "qr" : "manual");
+      setOrderMode(isPaymentQueue ? "qr" : payload.order.order_channel === "qr" ? "qr" : payload.order.order_channel === "delivery" ? "delivery" : "manual");
       setStep(isPaymentQueue ? "payment" : "fulfillment");
       setView("order");
     } catch (reason) {
@@ -319,6 +401,8 @@ export default function App() {
   const kitchenRows = secondary.kitchen || [];
   const readyRows = (secondary.ready || []).filter((row: Row) => ["ready", "served"].includes(row.status));
   const paymentRows = (secondary.payments || []).filter((row: Row) => row.order_channel === "qr");
+  const deliveryRows = secondary.delivery || [];
+  const deliveryDrivers = secondary.deliveryDrivers || [];
   const tableRows = (secondary.operations || []).filter((row: Row) => row.code !== "COUNTER");
   const receipts = secondary.receipts || [];
 
@@ -344,7 +428,7 @@ export default function App() {
         </section>
 
         <nav className="tabs" aria-label="Bakuran operations">
-          {([["order", "New order"], ["payments", "QR orders"], ["kitchen", "Kitchen"], ["ready", "Ready"], ["operations", "Operations"]] as Array<[View, string]>).map(([key, text]) => (
+          {([["order", "New order"], ["payments", "QR orders"], ["kitchen", "Kitchen"], ["ready", "Ready"], ["delivery", "Delivery"], ["operations", "Operations"]] as Array<[View, string]>).map(([key, text]) => (
             <button className={view === key ? "active" : ""} key={key} onClick={() => navigate(key)}>{text}</button>
           ))}
         </nav>
@@ -445,13 +529,23 @@ export default function App() {
                     {step === "confirm" && (
                       <section className="flow-grid confirm-grid">
                         <section className="panel">
-                          <div className="panel-heading"><div><span className="eyebrow">02 / Customer</span><h2>Name for pickup</h2></div></div>
-                          <p className="panel-intro">Use the name to call the customer when the order is ready.</p>
-                          <label className="field-label" htmlFor="customer-name">Customer name</label>
+                          <div className="panel-heading"><div><span className="eyebrow">02 / {orderMode === "delivery" ? "Delivery details" : "Customer"}</span><h2>{orderMode === "delivery" ? "Where should it go?" : "Name for pickup"}</h2></div></div>
+                          <p className="panel-intro">{orderMode === "delivery" ? "Save the delivery address and contact details before collecting cash." : "Use the name to call the customer when the order is ready."}</p>
+                          <label className="field-label" htmlFor="customer-name">{orderMode === "delivery" ? "Customer / contact name" : "Customer name"}</label>
                           <input id="customer-name" className="text-input" autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="e.g. Mika" />
+                          {orderMode === "delivery" && (
+                            <div className="delivery-form">
+                              <label className="field-label" htmlFor="delivery-address">Delivery address</label>
+                              <input id="delivery-address" className="text-input" value={deliveryAddress} onChange={(event) => setDeliveryAddress(event.target.value)} placeholder="Street, area, city" />
+                              <label className="field-label" htmlFor="delivery-contact">Contact number</label>
+                              <input id="delivery-contact" className="text-input" type="tel" value={deliveryContact} onChange={(event) => setDeliveryContact(event.target.value)} placeholder="09xx xxx xxxx" />
+                              <label className="field-label" htmlFor="delivery-contact-name">Contact name (optional)</label>
+                              <input id="delivery-contact-name" className="text-input" value={deliveryContactName} onChange={(event) => setDeliveryContactName(event.target.value)} placeholder="Recipient name" />
+                            </div>
+                          )}
                           <div className="button-row">
                             <button className="text-button" onClick={() => setStep("build")}>Back to basket</button>
-                            <button className="action-button primary" disabled={!customerName.trim() || !hasItems || !!busy} onClick={() => void confirmOrder()}>{busy === "confirm" ? "Saving…" : "Continue to payment"}</button>
+                            <button className="action-button primary" disabled={!customerName.trim() || !hasItems || !!busy || (orderMode === "delivery" && (!deliveryAddress.trim() || !deliveryContact.trim()))} onClick={() => void confirmOrder()}>{busy === "confirm" ? "Saving…" : "Continue to payment"}</button>
                           </div>
                         </section>
                         <section className="panel summary-panel">
@@ -466,13 +560,14 @@ export default function App() {
                     {step === "payment" && (
                       <section className="handoff-card">
                         <div className="handoff-copy">
-                          <span className="eyebrow">03 / {orderMode === "qr" ? "QR payment" : "Payment"}</span>
-                          <h2>{orderMode === "qr" ? "Review and collect cash." : "Collect cash."}</h2>
-                          <p>{orderMode === "qr" ? "This order was submitted by the customer. The basket is read-only." : "The order number appears after payment."}</p>
+                          <span className="eyebrow">03 / {orderMode === "qr" ? "QR payment" : orderMode === "delivery" ? "Delivery payment" : "Payment"}</span>
+                          <h2>{orderMode === "qr" ? "Review and collect cash." : orderMode === "delivery" ? "Collect cash for delivery." : "Collect cash."}</h2>
+                          <p>{orderMode === "qr" ? "This order was submitted by the customer. The basket is read-only." : orderMode === "delivery" ? "The order is paid before dispatch. The delivery board opens after payment." : "The order number appears after payment."}</p>
                           {orderMode === "qr" && <div className="order-number">{currentOrder?.order_number}</div>}
                           <div className="handoff-meta">
                             <span>{currentOrder?.customer_name || "Customer"}</span>
                             {orderMode === "qr" && currentOrder?.table_code && <span>{currentOrder.table_code}</span>}
+                            {orderMode === "delivery" && <span>{deliveryAddress}</span>}
                             <span>{money(currentOrder?.total)} due</span>
                             <StatusPill value={orderMode === "qr" ? "qr order" : "payment required"} />
                           </div>
@@ -517,6 +612,9 @@ export default function App() {
             loading={secondaryLoading}
             paymentRows={paymentRows}
             kitchenRows={view === "ready" ? readyRows : kitchenRows}
+            deliveryRows={deliveryRows}
+            deliveryDrivers={deliveryDrivers}
+            deliveryBusy={busy.startsWith("delivery-")}
             tableRows={tableRows}
             receipts={receipts}
             taxConfiguration={secondary.taxConfiguration || null}
@@ -527,6 +625,8 @@ export default function App() {
             onSearch={() => void loadSecondary("payments")}
             onRefresh={() => void loadSecondary(view)}
             onSelect={(order) => void openSecondaryOrder(order)}
+            onDeliveryAction={(deliveryId, action, body) => void mutateDelivery(deliveryId, action, body)}
+            onStartDelivery={() => void startDeliveryOrder()}
           />
         )}
       </main>
@@ -574,13 +674,74 @@ function TaxBreakdown({ order }: { order: Row }) {
   );
 }
 
-function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, receipts, taxConfiguration, taxSaving, onSaveTaxRule, search, setSearch, onSearch, onRefresh, onSelect }: { view: View; loading: boolean; paymentRows: Row[]; kitchenRows: Row[]; tableRows: Row[]; receipts: Row[]; taxConfiguration: Row | null; taxSaving: boolean; onSaveTaxRule: (payload: Row) => Promise<boolean>; search: string; setSearch: (value: string) => void; onSearch: () => void; onRefresh: () => void; onSelect: (order: Row) => void }) {
+export function DeliveryBoard({ deliveries, drivers, busy, onAction, onStartDelivery }: { deliveries: Row[]; drivers: Row[]; busy: boolean; onAction: (deliveryId: number, action: DeliveryAction, body?: Row) => void; onStartDelivery?: () => void }) {
+  const [driverSelection, setDriverSelection] = useState<Record<string, string>>({});
+
+  function selectedDriver(delivery: Row) {
+    return driverSelection[delivery.id] || String(delivery.driver_id || drivers[0]?.id || "");
+  }
+
+  function askForReason(deliveryId: number, action: "failed" | "cancel") {
+    const reason = window.prompt(action === "failed" ? "Why did this delivery fail?" : "Why was this delivery cancelled?");
+    if (reason?.trim()) onAction(deliveryId, action, { reason: reason.trim() });
+  }
+
+  return (
+    <>
+      <div className="delivery-board-toolbar"><div><span className="eyebrow">Local dispatch</span><p>Paid delivery orders only. No external courier connection.</p></div><button className="action-button primary" onClick={onStartDelivery} disabled={busy}>New delivery</button></div>
+      {deliveries.length ? <div className="delivery-board">
+        {deliveries.map((delivery) => {
+        const status = String(delivery.status);
+        const selected = selectedDriver(delivery);
+        const terminal = ["delivered", "failed", "cancelled"].includes(status);
+        return (
+          <article className="delivery-card" key={delivery.id}>
+            <div className="delivery-card-head">
+              <div><span className="eyebrow">{delivery.order_number}</span><h3>{delivery.contact_name || delivery.customer_name || "Unnamed customer"}</h3><p>{money(delivery.order_total)} · {delivery.contact}</p></div>
+              <StatusPill value={status} />
+            </div>
+            <div className="delivery-meta">
+              <div><span>Address</span><strong>{delivery.address}</strong></div>
+              <div><span>Contact</span><strong>{delivery.contact_name || delivery.customer_name || "No contact name"}</strong><small>{delivery.contact}</small></div>
+              <div><span>Driver</span><strong>{delivery.driver?.name || "Unassigned"}</strong></div>
+            </div>
+            <div className="delivery-history">
+              <span>Assignment history</span>
+              {delivery.assignments?.length ? delivery.assignments.map((assignment: Row) => <small key={assignment.id}>{assignment.driver_name} · {assignment.status}</small>) : <small>No driver assigned yet.</small>}
+            </div>
+            {!terminal && (
+              <div className="delivery-actions">
+                {(status === "pending" || status === "assigned") && (
+                  <>
+                    <select aria-label={`Driver for ${delivery.order_number}`} value={selected} onChange={(event) => setDriverSelection({ ...driverSelection, [delivery.id]: event.target.value })} disabled={busy}>
+                      <option value="">Choose driver</option>
+                      {drivers.map((driver) => <option value={driver.id} key={driver.id}>{driver.name}</option>)}
+                    </select>
+                    <button className="action-button" disabled={busy || !selected} onClick={() => onAction(delivery.id, "assign", { driver_id: Number(selected) })}>{status === "assigned" ? "Reassign" : "Assign driver"}</button>
+                  </>
+                )}
+                {status === "assigned" && <button className="action-button primary" disabled={busy} onClick={() => onAction(delivery.id, "out-for-delivery")}>Out for delivery</button>}
+                {status === "out_for_delivery" && <button className="action-button primary" disabled={busy} onClick={() => onAction(delivery.id, "delivered")}>Mark delivered</button>}
+                <button className="text-button" disabled={busy} onClick={() => askForReason(delivery.id, "failed")}>Fail</button>
+                <button className="text-button" disabled={busy} onClick={() => askForReason(delivery.id, "cancel")}>Cancel</button>
+              </div>
+            )}
+          </article>
+        );
+        })}
+      </div> : <Empty>No delivery orders are ready for dispatch.</Empty>}
+    </>
+  );
+}
+
+function SecondaryView({ view, loading, paymentRows, kitchenRows, deliveryRows, deliveryDrivers, deliveryBusy, tableRows, receipts, taxConfiguration, taxSaving, onSaveTaxRule, search, setSearch, onSearch, onRefresh, onSelect, onDeliveryAction, onStartDelivery }: { view: View; loading: boolean; paymentRows: Row[]; kitchenRows: Row[]; deliveryRows: Row[]; deliveryDrivers: Row[]; deliveryBusy: boolean; tableRows: Row[]; receipts: Row[]; taxConfiguration: Row | null; taxSaving: boolean; onSaveTaxRule: (payload: Row) => Promise<boolean>; search: string; setSearch: (value: string) => void; onSearch: () => void; onRefresh: () => void; onSelect: (order: Row) => void; onDeliveryAction: (deliveryId: number, action: DeliveryAction, body?: Row) => void; onStartDelivery: () => void }) {
   const titles: Record<View, [string, string]> = {
     order: ["", ""],
     payments: ["02 / Payment", "QR orders"],
     kitchen: ["03 / Kitchen", "Kitchen"],
     ready: ["04 / Pickup", "Ready"],
-    operations: ["05 / Reference", "Operations"],
+    delivery: ["05 / Dispatch", "Delivery"],
+    operations: ["06 / Reference", "Operations"],
   };
   const [eyebrow, heading] = titles[view];
   const description = view === "payments"
@@ -589,7 +750,9 @@ function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, rec
       ? "Paid orders appear here automatically."
       : view === "ready"
         ? "Call customers by name or order number."
-        : "Tables and receipts stay available when needed.";
+        : view === "delivery"
+          ? "Assign active drivers and track paid deliveries."
+          : "Tables and receipts stay available when needed.";
 
   return (
     <section className="secondary-page">
@@ -623,6 +786,8 @@ function SecondaryView({ view, loading, paymentRows, kitchenRows, tableRows, rec
             </article>
           )) : <Empty>No orders in this queue.</Empty>}
         </div>
+      ) : view === "delivery" ? (
+        <DeliveryBoard deliveries={deliveryRows} drivers={deliveryDrivers} busy={loading || deliveryBusy} onAction={onDeliveryAction} onStartDelivery={onStartDelivery} />
       ) : (
         <>
           <div className="operations-grid">

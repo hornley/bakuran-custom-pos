@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 
-const API_BASE = import.meta.env.VITE_API_URL || `${window.location.protocol}//${window.location.hostname}:5300`;
+const API_BASE = import.meta.env.VITE_API_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5300` : "http://localhost:5300");
 type Session = { authenticated: boolean; auth_enabled: boolean; user?: { username: string; roles: string[] } };
 
 export function csrfHeaders(): Record<string, string> {
