@@ -254,7 +254,7 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `POST /api/orders/{order_id}/close` | Complete pickup and issue a receipt |
 | `GET /api/payment-queue` | List unpaid submitted orders for front-desk selection |
 | `GET /api/kitchen` | List kitchen tickets |
-| `GET /api/receipts` | List sales receipts |
+| `GET /api/receipts` | List sales receipts with immutable tax snapshots |
 | `GET /api/tables` | Secondary operations reference |
 || `GET /api/warehouses` | List active warehouse scopes |
 || `POST /api/warehouses` | Create an active warehouse scope |
@@ -284,6 +284,8 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 || `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
 || `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
 || `GET /api/audit-events` | Review audit events for inventory, purchasing, delivery, and auth actions |
+|| `GET /api/tax/configuration` | List tax rules and the rule effective today |
+|| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
 
 The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it records a draft as ordered, receives all outstanding lines, and returns the historical purchase-row response. The legacy `POST /api/stock/receipt` endpoint remains available and supports an optional idempotency key for safe retries.
 
@@ -307,8 +309,31 @@ Orders support:
 - Customer names are trimmed, required, limited to 80 characters, and reject control characters. A basket contains 1–50 unique menu items, each with a quantity from 1–20.
 - `Idempotency-Key` is required, trimmed, limited to 128 visible characters, and scoped to the table session. A retry with the same key and equivalent payload returns the original order. Reuse with a different name or basket returns `409`.
 - An open table session can have at most one active QR order. New submissions after the first QR order return `409`; retries remain safe and do not create another order.
-- QR orders are created as `awaiting_payment`, without a payment or kitchen ticket. Only the existing staff-recorded cash payment flow releases a paid order to the kitchen.
+- QR orders are created as `awaiting_payment`, with the server-selected tax snapshot and tax-inclusive total, without a payment or kitchen ticket. Only the existing staff-recorded cash payment flow releases a paid order to the kitchen. Legacy QR awaiting-payment rows without a snapshot are snapshotted transactionally before payment validation.
 - The public customer API is bearer-token based and does not bypass authentication on operator routes. With shipped `AUTH_PROFILE=disabled`, operator mutations require `401` unless `AUTH_LOCAL_DEV_BYPASS=true` is explicitly set for a trusted local development instance. For protected operation, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`; operator sessions, roles, and CSRF checks then apply. CORS remains limited to configured frontend origins.
+
+### Tax calculation and snapshots
+
+- Tax rules contain a name, a decimal percentage rate from `0` through `100`, an
+  `exclusive` or `inclusive` policy, and an ISO effective date range. Rates are
+  stored as text and support at most four decimal places.
+- The server selects the rule effective on the confirmation date for manual and delivery orders, and at QR order creation for customer-submitted QR orders. Effective
+  ranges are inclusive; overlapping ranges are rejected, while adjacent date
+  ranges are allowed.
+- All tax and payment amounts use `Decimal`, with explicit half-up rounding to
+  cents. Exclusive tax is calculated from the pre-tax subtotal; inclusive tax extracts the tax from the tax-inclusive total.
+- Confirmation copies the selected rule and calculated taxable subtotal, tax,
+  and total to the order. QR creation performs the same server-side snapshot before
+  returning the awaiting-payment order. Payment must equal that tax-inclusive total
+  to the cent, and payment still gates kitchen release. A legacy QR awaiting-payment
+  row with no snapshot is snapshotted before payment amount validation.
+- Closing copies the order tax snapshot into exactly one immutable receipt.
+  Later rule changes cannot alter historical orders or receipts.
+- Customer QR order creation and payment use the same transactional server-side tax
+  snapshot contract as the front-desk flow; client-provided tax values are ignored.
+- If no rule is effective, the existing zero-tax total is preserved. Records
+  created before this migration remain zero-tax and are not retroactively recalculated.
+- With the checked-in `auth_profile: disabled` deployment, local API access is intentionally unauthenticated so the existing local desk still opens directly. Setting `AUTH_PROFILE=local` and `AUTH_ENABLED=true` enables the existing local-session middleware; tax configuration then requires a manager or administrator and uses CSRF protection. This is local authentication, not hosted identity, SSO, MFA, or a compliance certification.
 
 ### Inventory and purchasing contract
 
@@ -332,6 +357,8 @@ Orders support:
 - Failed payments leave the order unpaid and out of the kitchen.
 - Back navigation is non-destructive.
 - Invalid kitchen transitions return a conflict response.
+- Invalid tax configuration returns validation/conflict responses without a
+  partial write, and each successful configuration is recorded in `audit_events`.
 - Premature kitchen release and invalid payment attempts must not mutate order state.
 - Delivery metadata, assignment, transition, and callback validation failures do not mutate delivery state.
 - Repeated idempotent delivery requests replay the original response; conflicting reuse of an idempotency key returns a conflict.
@@ -349,7 +376,7 @@ The current POS does not include:
 - External courier, driver, GPS, route-optimization, webhook, or online-delivery integration.
 - Delivery refunds, cash-on-delivery collection, or settlement workflows.
 - Multi-store or multi-location synchronization; the QR route, delivery board, and payment queue use the single local SQLite store.
-- Recipe-level stock depletion, automatic sale reservations, tax, discounts, or purchase invoicing.
+- Recipe-level stock depletion, automatic sale reservations, discounts, or purchase invoicing.
 
 ## 9. Acceptance criteria
 

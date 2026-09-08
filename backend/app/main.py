@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, DecimalException, ROUND_HALF_UP
 import hashlib
 import json
 import math
@@ -15,9 +16,11 @@ from .auth import (
     AUTH_ALLOWED_ORIGINS,
     AuthMiddleware,
     initialize_auth,
+    auth_enabled,
     record_event_in_connection,
     router as auth_router,
 )
+from .tax import TaxRuleConflictError, TaxValidationError, create_rule, effective_rule, order_tax_snapshot, snapshot_values
 
 # Inventory is counted in whole units. This practical application bound keeps
 # every persisted stock quantity well below SQLite's signed INTEGER limit while
@@ -77,6 +80,10 @@ try:
 except ImportError:
     PROJECT_NAME, TARGET_STACK, FRONTEND_TEMPLATE, EXPORT_STATUS = "Restaurant Management", "react_fastapi_sqlite", "operational_desk", "generated"
 
+CENT = Decimal("0.01")
+MAX_MONEY = Decimal("9999999999.99")
+MAX_ORDER_QUANTITY = 999_999_999
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -93,10 +100,26 @@ app.include_router(auth_router)
 
 class LineIn(BaseModel):
     menu_item_id: int
-    quantity: int = Field(gt=0)
+    quantity: int = Field(gt=0, le=MAX_ORDER_QUANTITY)
 class PaymentIn(BaseModel):
-    amount: float = Field(gt=0)
+    amount: Decimal = Field(gt=0)
     method: str
+
+    @field_validator("amount")
+    @classmethod
+    def amount_valid(cls, value):
+        if not value.is_finite():
+            raise ValueError("amount must be a finite decimal")
+        if value > MAX_MONEY:
+            raise ValueError("amount is outside the supported monetary range")
+        if value.as_tuple().exponent < -2:
+            raise ValueError("amount must have at most two decimal places")
+        try:
+            value.quantize(CENT, rounding=ROUND_HALF_UP)
+        except DecimalException as exc:
+            raise ValueError("amount is outside the supported monetary range") from exc
+        return value
+
     @field_validator("method")
     @classmethod
     def method_valid(cls, value):
@@ -107,6 +130,28 @@ class PaymentIn(BaseModel):
 
 class OrderConfirmIn(BaseModel):
     customer_name: str = Field(min_length=1, max_length=80)
+
+class TaxRuleIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    rate: str = Field(min_length=1)
+    policy: str
+    effective_from: str
+    effective_to: str | None = None
+
+    @field_validator("rate", mode="before")
+    @classmethod
+    def rate_text(cls, value):
+        if value is None:
+            return value
+        return str(value)
+
+    @field_validator("policy")
+    @classmethod
+    def policy_valid(cls, value):
+        value = value.strip().lower()
+        if value not in {"exclusive", "inclusive"}:
+            raise ValueError("policy must be exclusive or inclusive")
+        return value
 
 class OrderStartIn(BaseModel):
     customer_name: str = Field(default="", max_length=80)
@@ -213,6 +258,31 @@ class DeliveryCallbackIn(DeliveryTransitionIn):
 
 def rows(c, sql, params=()): return [dict(x) for x in c.execute(sql, params).fetchall()]
 def fail(message, status=400): raise HTTPException(status_code=status, detail=message)
+
+
+def quantize_money(value, label: str) -> Decimal:
+    try:
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 0 or parsed > MAX_MONEY:
+            raise ValueError
+        return parsed.quantize(CENT, rounding=ROUND_HALF_UP)
+    except (DecimalException, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{label} is outside the supported monetary range") from exc
+
+
+def calculate_line_total(unit_price, quantity: int) -> Decimal:
+    try:
+        raw_total = Decimal(str(unit_price)) * quantity
+    except (DecimalException, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Order line total is outside the supported monetary range") from exc
+    return quantize_money(raw_total, "Order line total")
+
+
+def order_subtotal(c, order_id: int) -> Decimal:
+    values = c.execute("SELECT line_total FROM restaurant_order_lines WHERE order_id=?", (order_id,)).fetchall()
+    return quantize_money(sum((Decimal(str(row["line_total"])) for row in values), Decimal("0.00")), "Order total")
+
+
 def get(c, table, ident):
     row = c.execute(f"SELECT * FROM {table} WHERE id=?", (ident,)).fetchone()
     if not row: fail(f"{table.replace('_',' ').title()} not found", 404)
@@ -329,7 +399,7 @@ def _delivery_payment_required(c, delivery_id: int):
     return delivery, order
 def order_view(c, oid):
     o = get(c, "restaurant_orders", oid)
-    return {
+    value = {
         "order": dict(o),
         "lines": rows(c, "SELECT * FROM restaurant_order_lines WHERE order_id=? ORDER BY id", (oid,)),
         "ticket": next(iter(rows(c, "SELECT * FROM kitchen_tickets WHERE order_id=?", (oid,))), None),
@@ -337,6 +407,33 @@ def order_view(c, oid):
         "receipt": next(iter(rows(c, "SELECT * FROM receipts WHERE order_id=?", (oid,))), None),
         "delivery": _delivery_for_order(c, oid),
     }
+    def money_text(raw) -> str:
+        return format(Decimal(str(raw)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
+
+    taxable_subtotal = money_text(o["taxable_subtotal"])
+    tax_amount = money_text(o["tax_amount"])
+    if not o["tax_snapshot_at"] and o["tax_policy"] == "none":
+        taxable_subtotal = money_text(o["subtotal"])
+        tax_amount = "0.00"
+    value["tax"] = {
+        "rule_id": o["tax_rule_id"],
+        "name": o["tax_name"],
+        "rate": o["tax_rate"],
+        "policy": o["tax_policy"],
+        "taxable_subtotal": taxable_subtotal,
+        "tax_amount": tax_amount,
+        "total": money_text(o["total"]),
+        "snapshot_at": o["tax_snapshot_at"],
+    }
+    return value
+
+
+def receipt_view(row) -> dict:
+    # Keep the historical receipt `total` JSON number contract. Tax snapshot
+    # fields remain explicit decimal text so cents and provenance are lossless.
+    return dict(row)
+
+
 def table_view(c, table_id, qr_token=None):
     t = dict(get(c, "dining_tables", table_id))
     s = c.execute("SELECT id,session_number,table_id,status,opened_at,closed_at FROM table_sessions WHERE table_id=? AND status='open'", (table_id,)).fetchone()
@@ -447,13 +544,24 @@ def create_customer_order(c, session, payload, idempotency_key):
     stamp = now_iso()
     order_id = c.execute("SELECT COALESCE(MAX(id),0)+1 FROM restaurant_orders").fetchone()[0]
     c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel,client_idempotency_key,idempotency_fingerprint) VALUES(?,?,?,'awaiting_payment',0,0,?,NULL,NULL,NULL,NULL,?,'qr',?,?)", (order_id, f"ORD-{order_id:04d}", session["id"], stamp, payload.customer_name, idempotency_key, fingerprint))
-    total = 0
+    total = Decimal("0.00")
     for line in payload.lines:
         item = menu_by_id[line.menu_item_id]
-        line_total = line.quantity * item["price"]
+        line_total = calculate_line_total(item["price"], line.quantity)
         total += line_total
-        c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)", (order_id, item["id"], item["name"], line.quantity, item["price"], line_total))
-    c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=?", (total, total, order_id))
+        c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)", (order_id, item["id"], item["name"], line.quantity, item["price"], str(line_total)))
+    total = quantize_money(total, "Order total")
+    c.execute("UPDATE restaurant_orders SET subtotal=?, total=? WHERE id=?", (str(total), str(total), order_id))
+    snapshot = order_tax_snapshot(c, c.execute("SELECT * FROM restaurant_orders WHERE id=?", (order_id,)).fetchone(), stamp)
+    snapshot_values_without_total = snapshot_values(snapshot)[:6] + snapshot_values(snapshot)[7:]
+    c.execute(
+        """
+        UPDATE restaurant_orders
+        SET total=?, tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
+        WHERE id=?
+        """
+        , (str(snapshot["total"]), *snapshot_values_without_total, order_id),
+    )
     return customer_order_view(c, order_id)
 
 def create_ticket(c, order_id, stamp=None):
@@ -487,6 +595,37 @@ def health():
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database is not ready: {exc}") from exc
     return {"status":"ok", "database_ready":True, "project_name":PROJECT_NAME, "target_stack":TARGET_STACK, "frontend_template":FRONTEND_TEMPLATE, "export_status":EXPORT_STATUS}
+@app.get("/api/tax/configuration")
+def tax_configuration():
+    with connect() as c:
+        current = effective_rule(c)
+        return {"rules": rows(c, "SELECT * FROM tax_rules ORDER BY effective_from DESC, id DESC"), "effective_rule": dict(current) if current else None}
+
+@app.post("/api/tax/configuration", status_code=201)
+def configure_tax(payload: TaxRuleIn, request: Request):
+    if auth_enabled() and not (set(getattr(request.state, "auth_user", {}).get("roles", [])) & {"admin", "manager"}):
+        raise HTTPException(status_code=403, detail="Only managers and administrators can configure tax")
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            result = create_rule(c, payload.model_dump(), getattr(request.state, "auth_user", {}).get("id"))
+        except TaxRuleConflictError as exc:
+            c.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except TaxValidationError as exc:
+            c.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        c.commit()
+        return result
+    except HTTPException:
+        raise
+    except sqlite3.IntegrityError as exc:
+        c.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        c.close()
+
 @app.get("/api/tables")
 def tables():
     with connect() as c: return [table_view(c, r["id"]) for r in c.execute("SELECT id FROM dining_tables ORDER BY id")]
@@ -983,7 +1122,15 @@ def confirm_order(oid: int, x: OrderConfirmIn, request: Request):
             "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
         ).fetchone():
             fail("Delivery address and contact are required before confirmation", 422)
-        c.execute("UPDATE restaurant_orders SET customer_name=?,status='awaiting_payment' WHERE id=?", (x.customer_name.strip(), oid))
+        snapshot = order_tax_snapshot(c, o, now_iso())
+        c.execute(
+            """
+            UPDATE restaurant_orders
+            SET customer_name=?, status='awaiting_payment', tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, total=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
+            WHERE id=?
+            """
+            , (x.customer_name.strip(), *snapshot_values(snapshot), oid),
+        )
         c.commit()
         return order_view(c, oid)
     except HTTPException:
@@ -1000,9 +1147,13 @@ def add_line(oid:int,x:LineIn):
         item=c.execute("SELECT * FROM menu_items WHERE id=? AND active=1",(x.menu_item_id,)).fetchone()
         if not item: fail("Menu item not found or inactive",404)
         old=c.execute("SELECT quantity FROM restaurant_order_lines WHERE order_id=? AND menu_item_id=?",(oid,x.menu_item_id)).fetchone(); new_qty=x.quantity+(old[0] if old else 0)
-        if old: c.execute("UPDATE restaurant_order_lines SET quantity=?,line_total=? WHERE order_id=? AND menu_item_id=?",(new_qty,new_qty*item["price"],oid,x.menu_item_id))
-        else: c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)",(oid,x.menu_item_id,item["name"],x.quantity,item["price"],x.quantity*item["price"]))
-        total=c.execute("SELECT COALESCE(SUM(line_total),0) FROM restaurant_order_lines WHERE order_id=?",(oid,)).fetchone()[0]; c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=?",(total,total,oid)); c.commit(); return order_view(c,oid)
+        if new_qty > MAX_ORDER_QUANTITY:
+            fail("Order line quantity is outside the supported range", 422)
+        line_total = calculate_line_total(item["price"], new_qty)
+        if old: c.execute("UPDATE restaurant_order_lines SET quantity=?,line_total=? WHERE order_id=? AND menu_item_id=?",(new_qty,str(line_total),oid,x.menu_item_id))
+        else:
+            c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)",(oid,x.menu_item_id,item["name"],x.quantity,item["price"],str(line_total)))
+        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 @app.delete("/api/orders/{oid}/lines/{lid}")
@@ -1012,7 +1163,7 @@ def remove_line(oid:int,lid:int):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]!="open": fail("Only open orders can be edited",409)
         if not c.execute("DELETE FROM restaurant_order_lines WHERE id=? AND order_id=?",(lid,oid)).rowcount: fail("Order line not found",404)
-        total=c.execute("SELECT COALESCE(SUM(line_total),0) FROM restaurant_order_lines WHERE order_id=?",(oid,)).fetchone()[0]; c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=?",(total,total,oid)); c.commit(); return order_view(c,oid)
+        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 
@@ -1053,14 +1204,31 @@ def pay(oid:int,x:PaymentIn):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["order_channel"] == "delivery" and x.method != "cash":
             fail("Delivery orders accept cash payment only", 409)
-        if o["status"]=="paid": c.commit(); return order_view(c, oid)
+        if o["status"]=="paid":
+            existing = c.execute("SELECT amount FROM payments WHERE order_id=?", (oid,)).fetchone()
+            if existing and quantize_money(existing["amount"], "Stored payment amount") != quantize_money(x.amount, "Payment amount"):
+                fail("Payment amount must equal order total", 409)
+            c.commit(); return order_view(c, oid)
         if o["status"] != "awaiting_payment": fail("Order must be awaiting payment before payment",409)
-        if abs(x.amount-o["total"])>0.001: fail("Payment amount must equal order total",409)
         if o["order_channel"] == "delivery" and not c.execute(
             "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
         ).fetchone():
             fail("Delivery address and contact are required before payment", 422)
-        stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,x.amount,x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
+        if o["order_channel"] == "qr" and not o["tax_snapshot_at"]:
+            snapshot = order_tax_snapshot(c, o, now_iso())
+            c.execute(
+                """
+                UPDATE restaurant_orders
+                SET tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, total=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
+                WHERE id=?
+                """
+                , (*snapshot_values(snapshot)[:6], str(snapshot["total"]), *snapshot_values(snapshot)[7:], oid),
+            )
+            o = get(c, "restaurant_orders", oid)
+        amount = quantize_money(x.amount, "Payment amount")
+        if amount != quantize_money(o["total"], "Order total"):
+            fail("Payment amount must equal order total",409)
+        stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM payments").fetchone()[0]; c.execute("INSERT INTO payments(id,payment_number,order_id,amount,method,status,paid_at) VALUES(?,?,?,?,?,'paid',?)",(n,f"PAY-{n:04d}",oid,str(amount),x.method,stamp)); c.execute("UPDATE restaurant_orders SET status='paid',paid_at=? WHERE id=?",(stamp,oid));
         if o["status"] == "awaiting_payment":
             create_ticket(c, oid, stamp)
         c.commit(); return order_view(c,oid)
@@ -1072,10 +1240,22 @@ def close_order(oid:int):
     c=connect()
     try:
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
-        if o["status"]=="closed": c.commit(); return order_view(c,oid)
+        if o["status"]=="closed":
+            value = order_view(c,oid)
+            if value["receipt"]:
+                value["receipt"] = receipt_view(value["receipt"])
+            c.commit()
+            return value
         if o["status"] not in {"paid", "served"}: fail("Order must be paid before close",409)
         if not c.execute("SELECT 1 FROM payments WHERE order_id=?",(oid,)).fetchone(): fail("Paid order has no payment",409)
-        stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM receipts").fetchone()[0]; c.execute("INSERT INTO receipts VALUES(?,?,?,?,?)",(n,f"REC-{n:04d}",oid,o["total"],stamp)); c.execute("UPDATE restaurant_orders SET status='closed',closed_at=? WHERE id=?",(stamp,oid)); c.execute("UPDATE table_sessions SET status='closed',closed_at=? WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?)",(stamp,oid)); c.execute("UPDATE dining_tables SET status='available' WHERE id=(SELECT table_id FROM table_sessions WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?))",(oid,)); c.commit(); return order_view(c,oid)
+        stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM receipts").fetchone()[0]
+        snapshot = order_tax_snapshot(c, o, o["tax_snapshot_at"] or stamp)
+        c.execute("INSERT INTO receipts(id,receipt_number,order_id,total,issued_at,tax_rule_id,tax_name,tax_rate,tax_policy,taxable_subtotal,tax_amount,tax_snapshot_at,tax_effective_from,tax_effective_to) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(n,f"REC-{n:04d}",oid,str(snapshot["total"]),stamp,*snapshot_values(snapshot)[:6],*snapshot_values(snapshot)[7:]))
+        c.execute("UPDATE restaurant_orders SET status='closed',closed_at=? WHERE id=?",(stamp,oid)); c.execute("UPDATE table_sessions SET status='closed',closed_at=? WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?)",(stamp,oid)); c.execute("UPDATE dining_tables SET status='available' WHERE id=(SELECT table_id FROM table_sessions WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?))",(oid,));
+        value = order_view(c,oid)
+        value["receipt"] = receipt_view(value["receipt"])
+        c.commit()
+        return value
     except HTTPException:c.rollback();raise
     finally:c.close()
 
@@ -1629,7 +1809,8 @@ def settings():
 @app.get("/api/receipts")
 def receipts():
     with connect() as c:
-        return rows(c, "SELECT r.*,o.order_number,t.code table_code FROM receipts r JOIN restaurant_orders o ON o.id=r.order_id JOIN table_sessions s ON s.id=o.session_id JOIN dining_tables t ON t.id=s.table_id ORDER BY r.id DESC")
+        values = c.execute("SELECT r.*,o.order_number,t.code table_code FROM receipts r JOIN restaurant_orders o ON o.id=r.order_id JOIN table_sessions s ON s.id=o.session_id JOIN dining_tables t ON t.id=s.table_id ORDER BY r.id DESC").fetchall()
+        return [receipt_view(row) for row in values]
 
 @app.get("/api/payment-queue")
 def payment_queue(q: str = ""):

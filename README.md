@@ -18,6 +18,7 @@ This is the generated Bakuran POS project. The commands below are project-local 
 - [`docs/phases/phase-2.md`](docs/phases/phase-2.md): payment gate and ready/pickup queue phase record.
 - [`docs/phases/phase-3.md`](docs/phases/phase-3.md): operational hardening phase record and approval gate.
 - [`docs/phases/phase-4-inventory-purchasing.md`](docs/phases/phase-4-inventory-purchasing.md): inventory/purchasing vertical slice, checks, and approval gate.
+- [`docs/phases/phase-6-tax-configuration.md`](docs/phases/phase-6-tax-configuration.md): tax rules, rounding, snapshots, and validation.
 - [`docs/features/customer-qr-ordering.md`](docs/features/customer-qr-ordering.md): current customer QR vertical slice, contract, checks, and limitations.
 
 ## Run the project
@@ -70,6 +71,7 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 - Kitchen queue: move tickets through `queued -> preparing -> ready -> served`.
 - Delivery: create cash-only delivery orders, validate address/contact metadata, assign active drivers, and track dispatch through delivered, failed, or cancelled outcomes from the secondary delivery board.
 - Attendance: review employee attendance status.
+- Tax: configure effective inclusive/exclusive rules from the secondary Operations view and review tax breakdowns on orders.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
 - Operations: review warehouse-scoped inventory, low-stock/reorder levels, purchase lifecycle progress, receipts, and audit events.
 
@@ -132,13 +134,17 @@ GET /api/audit-events
 
 Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. The Operations route uses explicit warehouse filters, reasoned signed adjustments, per-line purchase receipts, and durable idempotency keys for supported mutations. The frontend uses `/api/receipts` for sales receipts. The legacy no-body purchase receive endpoint remains available for older clients and records an implicit ordered transition before completion; legacy stock receipts accept an optional idempotency key.
 
-Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order; only the authenticated front desk can record cash and release that order to kitchen.
+## Tax configuration
+
+The desk is zero-tax compatible when no rule is active. Tax rules are created from the secondary Operations view or `POST /api/tax/configuration`; the server validates decimal rates (`0`–`100`), inclusive/exclusive policy, and non-overlapping inclusive effective date ranges. Confirmation snapshots the effective rule and calculates tax with `Decimal` half-up cent rounding. Payment must equal the tax-inclusive total, and receipts retain the same immutable snapshot.
+
+- Customer QR submission uses `POST /api/customer/tables/{token}/orders` with a bounded `Idempotency-Key`. It returns an `awaiting_payment` order with the server-selected tax snapshot and tax-inclusive total; only the authenticated front desk can record cash and release that order to kitchen. Payment defensively snapshots legacy QR awaiting-payment rows that lack a snapshot before validating the amount, so pre-fix rows cannot bypass configured tax.
 
 Delivery mutations are payment-gated, use transaction-safe guarded transitions, preserve assignment history, and accept only cash. `Idempotency-Key` is supported for assignment and staff transition retries; callback identifiers make repeated local callback deliveries safe. Delivery audit events are available from `/api/audit-events`.
 
 ## Authentication
 
-The current manifest uses `auth_profile: disabled`, but operator mutations are still denied by default. Set `AUTH_LOCAL_DEV_BYPASS=true` only for a trusted local development instance that intentionally uses the legacy open desk. For protected operator access, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`, then configure `AUTH_BOOTSTRAP_USERNAME` and `AUTH_BOOTSTRAP_PASSWORD` on first startup. In local auth mode, operator reads and mutations require a session, mutations also require the CSRF token, and role checks remain active. `GET /api/health` and `/api/auth/login`, `/api/auth/logout`, and `/api/auth/session` remain public; customer bearer tokens do not grant operator access. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
+The current manifest uses `auth_profile: disabled`, but operator mutations are denied by default. Set `AUTH_LOCAL_DEV_BYPASS=true` only for a trusted local development instance that intentionally uses the legacy open desk. For protected operator access, set `AUTH_PROFILE=local` and `AUTH_ENABLED=true`, then configure `AUTH_BOOTSTRAP_USERNAME` and `AUTH_BOOTSTRAP_PASSWORD` on first startup. In local auth mode, operator reads and mutations require a session, mutations also require the CSRF token, and role checks remain active. `GET /api/health` and `/api/auth/login`, `/api/auth/logout`, and `/api/auth/session` remain public; customer bearer tokens do not grant operator access. This project is not a hosted identity service and does not include SSO, MFA, password recovery, or external identity providers.
 
 Customer QR endpoints are intentionally public bearer-token routes. They do not grant access to operator endpoints, and the customer frontend omits operator cookies. QR tokens are session-scoped and stored only as hashes.
 
@@ -156,4 +162,4 @@ If another application owns either port, stop that application before running `.
 
 ## Boundaries
 
-This is a local, single-store SQLite operational slice. It does not include multi-location synchronization or transfers, reservations, external payment gateways, refunds, tax calculation, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers.
+This is a local single-store SQLite operational slice. It does not include multi-location synchronization or transfers, reservations, external payment gateways, online card payment, refunds, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers. Tax is limited to configured single-store rules and immutable snapshots; inventory and purchasing are available as deferred back-office capabilities; neither area is fiscal-device, accounting, or inventory-compliance software.

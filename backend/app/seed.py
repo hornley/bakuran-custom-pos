@@ -31,13 +31,13 @@ def seed(c):
         ],
     )
     if not c.execute("SELECT 1 FROM table_sessions WHERE id=1").fetchone():
-        c.execute("INSERT INTO table_sessions(id,session_number,table_id,status,opened_at,closed_at) VALUES (1,'SES-0001',1,'closed',?,?)",(SEED_TIMESTAMP,SEED_TIMESTAMP))
-        c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel) VALUES (1,'ORD-0001',1,'closed',23,23,?,?,?,?,?,'Walk-in Customer','table')",(SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP))
+        c.execute("INSERT INTO table_sessions(id,session_number,table_id,status,opened_at,closed_at) VALUES (1,'SES-0001',1,'closed',?,?)", (SEED_TIMESTAMP, SEED_TIMESTAMP))
+        c.execute("INSERT INTO restaurant_orders(id,order_number,session_id,status,subtotal,total,created_at,sent_at,served_at,paid_at,closed_at,customer_name,order_channel,tax_rule_id,tax_name,tax_rate,tax_policy,taxable_subtotal,tax_amount,tax_snapshot_at,tax_effective_from,tax_effective_to) VALUES (1,'ORD-0001',1,'closed',23,23,?,?,?,?,?,'Walk-in Customer','table',NULL,'','0.00','none','23.00','0.00',?,?,NULL)", (SEED_TIMESTAMP, SEED_TIMESTAMP, SEED_TIMESTAMP, SEED_TIMESTAMP, SEED_TIMESTAMP, SEED_TIMESTAMP, None))
         c.execute("INSERT INTO restaurant_order_lines VALUES (1,1,3,'Lemonade',1,5,5)")
         c.execute("INSERT INTO restaurant_order_lines VALUES (2,1,1,'House Burger',1,18,18)")
         c.execute("INSERT INTO kitchen_tickets VALUES (1,'KIT-0001',1,'served','main',?,?,?,?)",(SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP,SEED_TIMESTAMP))
         c.execute("INSERT INTO payments VALUES (1,'PAY-0001',1,23,'cash','paid',?)",(SEED_TIMESTAMP,))
-        c.execute("INSERT INTO receipts VALUES (1,'REC-0001',1,23,?)",(SEED_TIMESTAMP,))
+        c.execute("INSERT INTO receipts(id,receipt_number,order_id,total,issued_at,tax_rule_id,tax_name,tax_rate,tax_policy,taxable_subtotal,tax_amount,tax_snapshot_at,tax_effective_from,tax_effective_to) VALUES (1,'REC-0001',1,23,?,NULL,'','0.00','none','23.00','0.00',?,?,NULL)", (SEED_TIMESTAMP,SEED_TIMESTAMP,None))
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ describe("counter operational flows", () => {
     await settle();
 
     expect(paymentRequests).toHaveLength(1);
-    expect(JSON.parse(String(paymentRequests[0].body))).toEqual({ amount: 12, method: "cash" });
+    expect(JSON.parse(String(paymentRequests[0].body))).toEqual({ amount: "12", method: "cash" });
     expect(container.textContent).toContain("Order is moving.");
     await act(async () => root.unmount());
   });
@@ -162,23 +162,64 @@ describe("counter operational flows", () => {
     await act(async () => root.unmount());
   });
 
-  it("keeps inventory and purchasing unloaded until Operations is opened", async () => {
+  it("renders the server tax breakdown in the confirmation step", async () => {
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
     const fetchMock = vi.fn((url: string) => {
-      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/warehouses") || url.endsWith("/api/purchases") || url.endsWith("/api/suppliers") || url.endsWith("/api/audit-events")) return response([]);
-      if (url.endsWith("/api/catalog")) return response(menu);
-      if (url.endsWith("/api/inventory?warehouse_id=1")) return response({ products: [], movements: [] });
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order: { ...order }, lines: [] });
+      if (url.endsWith("/lines")) return response({ order: { ...order, total: 12 }, lines: [line] });
+      if (url.endsWith("/confirm")) return response({ order: { ...order, total: 13.2, customer_name: "Mika", status: "awaiting_payment", tax_policy: "exclusive", tax_rate: "10.00", tax_name: "VAT", taxable_subtotal: "12.00", tax_amount: "1.20" }, lines: [line], tax: { policy: "exclusive", rate: "10.00", name: "VAT", taxable_subtotal: "12.00", tax_amount: "1.20", total: "13.20" } });
       return response([]);
     });
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
-
-    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/api/inventory"), expect.anything());
-    await act(async () => { button(container, "Operations").click(); });
+    await act(async () => button(container, "Start order").click());
     await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    await act(async () => container.querySelector<HTMLButtonElement>(".basket-actions button")!.click());
+    await settle();
+    const name = container.querySelector<HTMLInputElement>("#customer-name")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => { setInputValue?.call(name, "Mika"); name.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => button(container, "Continue to payment").click());
+    await settle();
+    expect(container.textContent).toContain("VAT (10.00%)");
+    expect(container.textContent).toContain("$1.20");
+    expect(container.textContent).toContain("$13.20");
+    await act(async () => root.unmount());
+  });
 
+  it("loads tax configuration and inventory purchasing as secondary operations", async () => {
+    const purchase = {
+      id: 5,
+      purchase_number: "PUR-0005",
+      supplier_name: "Local Supply",
+      status: "ordered",
+      total: 80,
+      lines: [{ id: 9, product_id: 1, warehouse_id: 1, product_name: "Adobo", warehouse_code: "MAIN", received_quantity: 0, quantity: 10, unit_cost: 8 }],
+    };
+    const configuration = { rules: [], effective_rule: null };
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (options?.method === "POST" && url.endsWith("/api/tax/configuration")) return response({ id: 1 });
+      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/warehouses") || url.endsWith("/api/audit-events")) return response([]);
+      if (url.endsWith("/api/tax/configuration")) return response(configuration);
+      if (url.endsWith("/api/catalog")) return response(menu.map((item) => ({ ...item, sku: "ADO-001", active: 1 })));
+      if (url.endsWith("/api/inventory?warehouse_id=1")) return response({ products: [], movements: [] });
+      if (url.endsWith("/api/purchases")) return response([purchase]);
+      if (url.endsWith("/api/suppliers")) return response([{ id: 1, name: "Local Supply", active: 1 }]);
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/api/inventory"), expect.anything());
+    await act(async () => button(container, "Operations").click());
+    await settle();
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5300/api/inventory?warehouse_id=1", expect.objectContaining({ credentials: "include" }));
-    expect(fetchMock).toHaveBeenCalledWith("http://localhost:5300/api/purchases", expect.objectContaining({ credentials: "include" }));
+    expect(container.querySelector('[aria-label="Tax configuration"]')).toBeTruthy();
     expect(container.textContent).toContain("Move stock with a reason");
     expect(container.textContent).toContain("Low-stock visibility");
+    await act(async () => button(container, "Save tax rule").click());
+    await settle();
+    expect(fetchMock.mock.calls.some(([url, options]) => String(url).endsWith("/api/tax/configuration") && (options as RequestInit)?.method === "POST")).toBe(true);
     await act(async () => root.unmount());
   });
 
@@ -197,7 +238,7 @@ describe("counter operational flows", () => {
         receiptRequests.push(JSON.parse(String(options.body)));
         return response({ purchase, lines: purchase.lines });
       }
-      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events")) return response([]);
+      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events") || url.endsWith("/api/tax/configuration")) return response(url.endsWith("/api/tax/configuration") ? { rules: [], effective_rule: null } : []);
       if (url.includes("/api/inventory?warehouse_id=1")) return response({ products: [{ product_id: 1, sku: "ADO-001", name: "Adobo", warehouse_id: 1, on_hand: 5, reserved: 0, available: 5, reorder_level: 2, low_stock: false, reorder_quantity: 0 }], movements: [] });
       if (url.endsWith("/api/warehouses")) return response([{ id: 1, code: "MAIN", name: "Main Warehouse" }]);
       if (url.endsWith("/api/purchases")) return response([purchase]);
@@ -206,51 +247,27 @@ describe("counter operational flows", () => {
       return response([]);
     });
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
-
     await act(async () => { button(container, "Operations").click(); });
     await settle();
     const receiptInput = container.querySelector<HTMLInputElement>('input[aria-label="Receive Adobo"]')!;
     const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    await act(async () => {
-      setInputValue?.call(receiptInput, "3");
-      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    await act(async () => { setInputValue?.call(receiptInput, "3"); receiptInput.dispatchEvent(new Event("input", { bubbles: true })); });
     await act(async () => button(container, "Receive selected").click());
     await settle();
-    expect(receiptRequests[0]).toMatchObject({
-      lines: [{ product_id: 1, warehouse_id: 1, quantity: 3 }],
-      allow_over_receipt: false,
-    });
-
+    expect(receiptRequests[0]).toMatchObject({ lines: [{ product_id: 1, warehouse_id: 1, quantity: 3 }], allow_over_receipt: false });
     const override = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     await act(async () => override.click());
     await settle();
     const reason = container.querySelector<HTMLInputElement>('input[placeholder="Manager/admin reason"]')!;
-    await act(async () => {
-      setInputValue?.call(reason, "Manager approved supplier variance");
-      reason.dispatchEvent(new Event("input", { bubbles: true }));
-      setInputValue?.call(receiptInput, "11");
-      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    await act(async () => { setInputValue?.call(reason, "Manager approved supplier variance"); reason.dispatchEvent(new Event("input", { bubbles: true })); setInputValue?.call(receiptInput, "11"); receiptInput.dispatchEvent(new Event("input", { bubbles: true })); });
     await act(async () => button(container, "Receive selected").click());
     await settle();
-    expect(receiptRequests[1]).toMatchObject({
-      lines: [{ product_id: 1, warehouse_id: 1, quantity: 11 }],
-      allow_over_receipt: true,
-      override_reason: "Manager approved supplier variance",
-    });
+    expect(receiptRequests[1]).toMatchObject({ lines: [{ product_id: 1, warehouse_id: 1, quantity: 11 }], allow_over_receipt: true, override_reason: "Manager approved supplier variance" });
     await act(async () => root.unmount());
   });
 
   it("reuses a receipt idempotency key when the response is lost before retry", async () => {
-    const purchase = {
-      id: 5,
-      purchase_number: "PUR-0005",
-      supplier_name: "Local Supply",
-      status: "ordered",
-      total: 80,
-      lines: [{ id: 9, product_id: 1, warehouse_id: 1, product_name: "Adobo", warehouse_code: "MAIN", received_quantity: 0, quantity: 10, unit_cost: 8 }],
-    };
+    const purchase = { id: 5, purchase_number: "PUR-0005", supplier_name: "Local Supply", status: "ordered", total: 80, lines: [{ id: 9, product_id: 1, warehouse_id: 1, product_name: "Adobo", warehouse_code: "MAIN", received_quantity: 0, quantity: 10, unit_cost: 8 }] };
     const receiptRequests: Row[] = [];
     const fetchMock = vi.fn((url: string, options?: RequestInit) => {
       if (options?.method === "POST" && url.endsWith("/api/purchases/5/receive")) {
@@ -258,7 +275,7 @@ describe("counter operational flows", () => {
         if (receiptRequests.length === 1) return Promise.reject(new Error("Connection closed before the response"));
         return response({ purchase, lines: purchase.lines });
       }
-      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events")) return response([]);
+      if (url.endsWith("/api/tables") || url.endsWith("/api/receipts") || url.endsWith("/api/audit-events") || url.endsWith("/api/tax/configuration")) return response(url.endsWith("/api/tax/configuration") ? { rules: [], effective_rule: null } : []);
       if (url.includes("/api/inventory?warehouse_id=1")) return response({ products: [], movements: [] });
       if (url.endsWith("/api/warehouses")) return response([{ id: 1, code: "MAIN", name: "Main Warehouse" }]);
       if (url.endsWith("/api/purchases")) return response([purchase]);
@@ -267,20 +284,15 @@ describe("counter operational flows", () => {
       return response([]);
     });
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
-
     await act(async () => { button(container, "Operations").click(); });
     await settle();
     const receiptInput = container.querySelector<HTMLInputElement>('input[aria-label="Receive Adobo"]')!;
     const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-    await act(async () => {
-      setInputValue?.call(receiptInput, "3");
-      receiptInput.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    await act(async () => { setInputValue?.call(receiptInput, "3"); receiptInput.dispatchEvent(new Event("input", { bubbles: true })); });
     await act(async () => button(container, "Receive selected").click());
     await settle();
     await act(async () => button(container, "Receive selected").click());
     await settle();
-
     expect(receiptRequests).toHaveLength(2);
     expect(receiptRequests[0].idempotency_key).toMatch(/^receipt-/);
     expect(receiptRequests[1].idempotency_key).toBe(receiptRequests[0].idempotency_key);

@@ -91,7 +91,7 @@ export default function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [secondary, setSecondary] = useState<Record<string, Row[]>>({});
+  const [secondary, setSecondary] = useState<Record<string, any>>({});
   const [search, setSearch] = useState("");
   const [operationsWarehouse, setOperationsWarehouse] = useState(1);
   const secondaryRequest = useRef(0);
@@ -137,6 +137,7 @@ export default function App() {
       ticket: payload.ticket || null,
       payment: payload.payment || null,
       receipt: payload.receipt || null,
+      tax: payload.tax || null,
       delivery: payload.delivery || null,
     });
     if (payload.order.customer_name) setCustomerName(payload.order.customer_name);
@@ -271,7 +272,7 @@ export default function App() {
       setError("");
       const payload = await api<Row>(`/api/orders/${order.id}/pay`, {
         method: "POST",
-        body: JSON.stringify({ amount: Number(order.total), method: "cash" }),
+        body: JSON.stringify({ amount: String(order.total), method: "cash" }),
       });
       applyOrderPayload(payload);
       setStep("fulfillment");
@@ -359,7 +360,7 @@ export default function App() {
             ? "/api/delivery"
             : "/api/kitchen";
       if (target === "operations") {
-        const [tables, receipts, inventoryPayload, warehouseRows, purchaseRows, catalogRows, supplierRows, auditRows] = await Promise.all([
+        const [tables, receipts, inventoryPayload, warehouseRows, purchaseRows, catalogRows, supplierRows, auditRows, taxConfiguration] = await Promise.all([
           api<Row[]>("/api/tables"),
           api<Row[]>("/api/receipts"),
           api<Row>(`/api/inventory?warehouse_id=${warehouseId}`),
@@ -368,6 +369,7 @@ export default function App() {
           api<Row[]>("/api/catalog"),
           api<Row[]>("/api/suppliers"),
           api<Row[]>("/api/audit-events"),
+          api<Row>("/api/tax/configuration"),
         ]);
         if (requestId !== secondaryRequest.current) return;
         setSecondary((current) => ({
@@ -381,6 +383,7 @@ export default function App() {
           catalog: catalogRows.filter((item) => item.active !== 0),
           suppliers: supplierRows.filter((supplier) => supplier.active !== 0),
           audit: auditRows,
+          taxConfiguration,
         }));
       } else {
         const values = await api<Row[]>(path);
@@ -491,6 +494,21 @@ export default function App() {
     if (target !== "order") void loadSecondary(target);
   }
 
+  async function saveTaxRule(payload: Row): Promise<boolean> {
+    try {
+      setBusy("tax-config");
+      setError("");
+      await api<Row>("/api/tax/configuration", { method: "POST", body: JSON.stringify(payload) });
+      const taxConfiguration = await api<Row>("/api/tax/configuration");
+      setSecondary((current) => ({ ...current, taxConfiguration }));
+      setNotice("Tax rule saved.");
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save the tax rule.");
+      return false;
+    }
+  }
+
   async function mutateDelivery(
     deliveryId: number,
     action: DeliveryAction,
@@ -535,11 +553,11 @@ export default function App() {
   const hasItems = currentLines.length > 0;
   const currentStepIndex = steps.findIndex(([key]) => key === step);
   const kitchenRows = secondary.kitchen || [];
-  const readyRows = (secondary.ready || []).filter((row) => ["ready", "served"].includes(row.status));
-  const paymentRows = (secondary.payments || []).filter((row) => row.order_channel === "qr");
+  const readyRows = (secondary.ready || []).filter((row: Row) => ["ready", "served"].includes(row.status));
+  const paymentRows = (secondary.payments || []).filter((row: Row) => row.order_channel === "qr");
   const deliveryRows = secondary.delivery || [];
   const deliveryDrivers = secondary.deliveryDrivers || [];
-  const tableRows = (secondary.operations || []).filter((row) => row.code !== "COUNTER");
+  const tableRows = (secondary.operations || []).filter((row: Row) => row.code !== "COUNTER");
   const receipts = secondary.receipts || [];
   const inventoryRows = secondary.inventory || [];
   const warehouses = secondary.warehouses || [];
@@ -599,6 +617,7 @@ export default function App() {
                     <span className="eyebrow">Complete</span>
                     <h2>Ready for the next customer.</h2>
                     <p>{currentOrder?.customer_name || "Customer"} · {currentOrder?.order_number}</p>
+                    <TaxBreakdown order={{ ...(currentOrder || {}), ...(completedReceipt || {}) }} />
                     <div className="receipt-line"><span>Receipt {completedReceipt.receipt_number}</span><strong>{money(completedReceipt.total)}</strong></div>
                     <button className="action-button primary" onClick={resetOrder}>Start another order</button>
                   </section>
@@ -655,7 +674,7 @@ export default function App() {
                           {hasItems ? (
                             <>
                               <OrderLines order={currentOrder || {}} />
-                              <div className="order-total"><span>Total</span><strong>{money(currentOrder?.total)}</strong></div>
+                              <TaxBreakdown order={currentOrder || {}} />
                             </>
                           ) : (
                             <div className="basket-start"><div className="basket-icon">+</div><strong>Add items to begin.</strong><p>The basket will appear here.</p></div>
@@ -693,7 +712,7 @@ export default function App() {
                           <span className="eyebrow">Order summary</span>
                           <h2>Current order</h2>
                           <OrderLines order={currentOrder || {}} />
-                          <div className="order-total"><span>Total</span><strong>{money(currentOrder?.total)}</strong></div>
+                          <TaxBreakdown order={currentOrder || {}} />
                         </section>
                       </section>
                     )}
@@ -714,7 +733,7 @@ export default function App() {
                           </div>
                         </div>
                         <div className="handoff-action">
-                          <div className="mini-summary"><OrderLines order={currentOrder || {}} compact /><div className="order-total"><span>Total due</span><strong>{money(currentOrder?.total)}</strong></div></div>
+                          <div className="mini-summary"><OrderLines order={currentOrder || {}} compact /><TaxBreakdown order={currentOrder || {}} /></div>
                           <button className="action-button primary full" disabled={!!busy} onClick={() => void payOrder()}>{busy === `pay-${currentOrder?.id}` ? "Recording…" : "Record cash payment"}</button>
                           {orderMode === "qr" ? <button className="text-button" onClick={() => { setCurrentOrder(null); setOrderMode(null); setStep("build"); setView("payments"); }}>Back to QR orders</button> : <button className="text-button" onClick={() => setStep("confirm")}>Back to customer</button>}
                         </div>
@@ -758,6 +777,9 @@ export default function App() {
             deliveryBusy={busy.startsWith("delivery-")}
             tableRows={tableRows}
             receipts={receipts}
+            taxConfiguration={secondary.taxConfiguration || null}
+            taxSaving={busy === "tax-config"}
+            onSaveTaxRule={saveTaxRule}
             inventoryRows={inventoryRows}
             warehouses={warehouses}
             purchases={purchases}
@@ -810,6 +832,23 @@ function EntryChoice({ onManual, onQr, busy }: { onManual: () => void; onQr: () 
   );
 }
 
+function TaxBreakdown({ order }: { order: Row }) {
+  const tax = order.tax || {};
+  const policy = String(tax.policy ?? order.tax_policy ?? "none");
+  const taxableSubtotal = tax.taxable_subtotal ?? order.taxable_subtotal ?? order.subtotal ?? 0;
+  const taxAmount = tax.tax_amount ?? order.tax_amount ?? 0;
+  const total = tax.total ?? order.total ?? 0;
+  const rate = tax.rate ?? order.tax_rate;
+  const name = tax.name || order.tax_name || "Tax";
+  return (
+    <div className="tax-breakdown" aria-label="Tax breakdown">
+      <div className="tax-breakdown-row"><span>{policy === "inclusive" ? "Taxable subtotal" : "Subtotal"}</span><strong>{money(taxableSubtotal)}</strong></div>
+      <div className="tax-breakdown-row"><span>{policy === "none" ? "Tax" : `${name} (${rate}%)`}</span><strong>{money(taxAmount)}</strong></div>
+      <div className="tax-breakdown-row tax-breakdown-total"><span>Total</span><strong>{money(total)}</strong></div>
+    </div>
+  );
+}
+
 type SecondaryViewProps = {
   view: View;
   loading: boolean;
@@ -820,6 +859,9 @@ type SecondaryViewProps = {
   deliveryBusy: boolean;
   tableRows: Row[];
   receipts: Row[];
+  taxConfiguration: Row | null;
+  taxSaving: boolean;
+  onSaveTaxRule: (payload: Row) => Promise<boolean>;
   inventoryRows: Row[];
   warehouses: Row[];
   purchases: Row[];
@@ -914,6 +956,9 @@ function SecondaryView({
   deliveryBusy,
   tableRows,
   receipts,
+  taxConfiguration,
+  taxSaving,
+  onSaveTaxRule,
   inventoryRows,
   warehouses,
   purchases,
@@ -1077,9 +1122,45 @@ function SecondaryView({
             <section className="panel"><span className="eyebrow">Sales history</span><h3>Receipts</h3>{receipts.length ? <div className="simple-list">{receipts.slice(0, 8).map((receipt) => <div className="simple-row" key={receipt.id}><div><strong>{receipt.receipt_number}</strong><small>{receipt.order_number} · {receipt.table_code}</small></div><strong>{money(receipt.total)}</strong></div>)}</div> : <Empty>No receipts yet.</Empty>}</section>
           </div>
 
+          <TaxConfiguration configuration={taxConfiguration} saving={taxSaving} onSave={onSaveTaxRule} />
           <section className="panel audit-panel"><span className="eyebrow">Audit trail</span><h3>Inventory and purchasing events</h3>{auditEvents.length ? <div className="simple-list">{auditEvents.slice(0, 12).map((event) => <div className="simple-row" key={event.id}><div><strong>{label(event.event_type)}</strong><small>{event.detail || "No detail"}</small></div><small>{event.created_at}</small></div>)}</div> : <Empty>No operational events yet.</Empty>}</section>
         </div>
       )}
+    </section>
+  );
+}
+
+function TaxConfiguration({ configuration, saving, onSave }: { configuration: Row | null; saving: boolean; onSave: (payload: Row) => Promise<boolean> }) {
+  const [draft, setDraft] = useState({
+    name: "VAT",
+    rate: "10",
+    policy: "exclusive",
+    effective_from: new Date().toISOString().slice(0, 10),
+    effective_to: "",
+  });
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const saved = await onSave({ ...draft, effective_to: draft.effective_to || null });
+    if (saved) setDraft((current) => ({ ...current, effective_to: "" }));
+  }
+
+  const active = configuration?.effective_rule;
+  const rules = configuration?.rules || [];
+  return (
+    <section className="panel tax-config-panel" aria-label="Tax configuration">
+      <div className="panel-heading"><div><span className="eyebrow">Configuration</span><h3>Tax rules</h3></div><span className="panel-mark">Manager / admin</span></div>
+      <p className="panel-intro">Rules are selected by effective date and copied into orders at confirmation. Existing receipts do not change.</p>
+      <div className="tax-active-rule"><span className="eyebrow">Effective today</span><strong>{active ? `${active.name} · ${active.rate}% ${active.policy}` : "No active tax rule"}</strong></div>
+      <form className="tax-rule-form" onSubmit={submit}>
+        <label>Rule name<input id="tax-name" className="text-input" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required /></label>
+        <label>Rate (%)<input id="tax-rate" className="text-input" inputMode="decimal" value={draft.rate} onChange={(event) => setDraft({ ...draft, rate: event.target.value })} required /></label>
+        <label>Policy<select id="tax-policy" className="text-input" value={draft.policy} onChange={(event) => setDraft({ ...draft, policy: event.target.value })}><option value="exclusive">Exclusive</option><option value="inclusive">Inclusive</option></select></label>
+        <label>Effective from<input id="tax-effective-from" className="text-input" type="date" value={draft.effective_from} onChange={(event) => setDraft({ ...draft, effective_from: event.target.value })} required /></label>
+        <label>Effective to <span className="muted-label">optional</span><input id="tax-effective-to" className="text-input" type="date" value={draft.effective_to} onChange={(event) => setDraft({ ...draft, effective_to: event.target.value })} /></label>
+        <button className="action-button primary tax-save" disabled={saving}>{saving ? "Saving…" : "Save tax rule"}</button>
+      </form>
+      {rules.length > 0 && <div className="tax-rule-list"><span className="eyebrow">Configured rules</span>{rules.map((rule: Row) => <div className="simple-row" key={rule.id}><div><strong>{rule.name} · {rule.rate}% {rule.policy}</strong><small>{rule.effective_from} → {rule.effective_to || "open-ended"}</small></div><span className="status-pill">{rule.id === active?.id ? "Active" : "Scheduled"}</span></div>)}</div>}
     </section>
   );
 }
