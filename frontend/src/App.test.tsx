@@ -494,6 +494,43 @@ describe("counter operational flows", () => {
     await act(async () => root.unmount());
   });
 
+  it("keeps replacement available while a promotion is applied", async () => {
+    const appliedOrder = { ...order, id: 7, subtotal: 12, total: 10.56, original_subtotal: 12, discounted_subtotal: 9.6, discount_amount: 2.4, promotion: { applied_id: 11, code: "WELCOME20", name: "Welcome 20", discount_amount: 2.4, discounted_subtotal: 9.6 }, tax: { policy: "exclusive", rate: "10.00", name: "VAT", taxable_subtotal: 9.6, tax_amount: 0.96, total: 10.56 }, lines: [{ id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }] };
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/promotions")) return response([{ code: "WELCOME20", name: "Welcome 20", can_apply: true }, { code: "SAVE10", name: "Save ten", can_apply: true }]);
+      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
+      if (url.endsWith("/lines")) return response({ order: { ...order, id: 7, total: 12, subtotal: 12 }, lines: [{ id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }] });
+      if (url.endsWith("/promotions") && options?.method === "POST") return response({ ...appliedOrder, order: appliedOrder });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    await act(async () => button(container, "Start order").click()); await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click()); await settle();
+    const code = container.querySelector<HTMLInputElement>("#promotion-code")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => { setInputValue?.call(code, "WELCOME20"); code.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => button(container, "Apply promotion").click()); await settle();
+    expect(container.querySelector<HTMLInputElement>("#promotion-code")).not.toBeNull();
+    expect(container.textContent).toContain("Replace promotion");
+    await act(async () => root.unmount());
+  });
+
+  it("disables promotion entry when promotion availability cannot be loaded", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
+      if (url.endsWith("/api/promotions")) return Promise.reject(new Error("Promotions unavailable"));
+      if (url.endsWith("/lines")) return response({ order: { ...order, id: 7, total: 12, subtotal: 12 }, lines: [{ item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }] });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    await act(async () => button(container, "Start order").click()); await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click()); await settle();
+    expect(container.querySelector<HTMLInputElement>("#promotion-code")?.disabled).toBe(true);
+    await act(async () => root.unmount());
+  });
+
   it("shows a read-only promotion state when the operator lacks permission", async () => {
     const fetchMock = vi.fn((url: string) => {
       if (url.endsWith("/api/menu")) return response(menu);

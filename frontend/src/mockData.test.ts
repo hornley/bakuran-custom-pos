@@ -242,4 +242,20 @@ describe("mock visual data", () => {
   it("throws instead of silently accepting an unknown mock mutation", async () => {
     await expect(mockApi("/api/promotions", { method: "PATCH" })).rejects.toThrow(/unknown mock mutation/i);
   });
+
+  it("rejects a different payload for a reused promotion idempotency key", async () => {
+    const started = await mockApi<any>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
+    await mockApi<any>(`/api/orders/${started.order.id}/lines`, { method: "POST", body: JSON.stringify({ menu_item_id: 1, quantity: 1 }) });
+    const request = { method: "POST", headers: { "Idempotency-Key": "promotion-conflict-1" }, body: JSON.stringify({ code: "WELCOME20" }) };
+    await mockApi<any>(`/api/orders/${started.order.id}/promotions`, request);
+    await expect(mockApi<any>(`/api/orders/${started.order.id}/promotions`, { ...request, body: JSON.stringify({ code: "SAVE10" }) })).rejects.toThrow(/idempotency/i);
+  });
+
+  it("rejects promotion mutations after payment", async () => {
+    const started = await mockApi<any>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
+    await mockApi<any>(`/api/orders/${started.order.id}/lines`, { method: "POST", body: JSON.stringify({ menu_item_id: 1, quantity: 1 }) });
+    await mockApi<any>(`/api/orders/${started.order.id}/confirm`, { method: "POST", body: JSON.stringify({ customer_name: "Mika" }) });
+    await mockApi<any>(`/api/orders/${started.order.id}/pay`, { method: "POST", body: JSON.stringify({ amount: 18, method: "cash" }) });
+    await expect(mockApi<any>(`/api/orders/${started.order.id}/promotions`, { method: "POST", headers: { "Idempotency-Key": "after-pay" }, body: JSON.stringify({ code: "WELCOME20" }) })).rejects.toThrow(/payment|available|eligible/i);
+  });
 });

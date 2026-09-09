@@ -341,7 +341,12 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     const payload = parseJson(options);
     const code = String(payload.code || "").trim().toUpperCase();
     const idempotencyKey = Object.entries(options?.headers || {}).find(([key]) => key.toLowerCase() === "idempotency-key")?.[1];
-    if (order.promotion?.idempotency_key && order.promotion.idempotency_key === idempotencyKey) return clone(orderView(order)) as T;
+    const fingerprint = JSON.stringify({ code });
+    if (order.promotion?.idempotency_key === idempotencyKey) {
+      if (order.promotion.idempotency_fingerprint !== fingerprint) throw new Error("Idempotency-Key was already used with a different request");
+      return clone(orderView(order)) as T;
+    }
+    if (!["open", "awaiting_payment"].includes(String(order.status || "open"))) throw new Error("Promotion cannot be changed after payment or release");
     const promotion = state.promotions.find((candidate) => candidate.code === code && candidate.active !== false);
     if (!promotion) throw new Error("Promotion code is not available");
     if (order.promotion && order.promotion.code === code) return clone(orderView(order)) as T;
@@ -350,6 +355,7 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
       id: state.nextAppliedPromotionId++,
       applied_id: state.nextAppliedPromotionId - 1,
       idempotency_key: idempotencyKey,
+      idempotency_fingerprint: fingerprint,
       discount_amount: promotionDiscount(promotion, Number(order.subtotal || 0)),
       discounted_subtotal: money(Math.max(Number(order.subtotal || 0) - promotionDiscount(promotion, Number(order.subtotal || 0)), 0)),
     };
@@ -365,6 +371,7 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     if (!Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "idempotency-key")) throw new Error("Idempotency-Key is required");
     const idempotencyKey = Object.entries(options?.headers || {}).find(([key]) => key.toLowerCase() === "idempotency-key")?.[1];
     if (!order.promotion && order.promotion_remove_key === idempotencyKey) return clone(orderView(order)) as T;
+    if (!["open", "awaiting_payment"].includes(String(order.status || "open"))) throw new Error("Promotion cannot be changed after payment or release");
     if (!order.promotion || ![Number(promotionRemoveMatch[2]), Number(order.promotion.applied_id)].includes(Number(order.promotion.id))) throw new Error("Applied promotion not found");
     order.promotion = null;
     order.promotion_remove_key = idempotencyKey;

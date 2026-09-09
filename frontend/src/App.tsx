@@ -106,6 +106,7 @@ export default function App() {
   const [promotions, setPromotions] = useState<Row[]>([]);
   const [promotionLoading, setPromotionLoading] = useState(false);
   const [promotionError, setPromotionError] = useState("");
+  const [promotionAvailabilityError, setPromotionAvailabilityError] = useState("");
   const [promotionCode, setPromotionCode] = useState("");
   const [promotionBusy, setPromotionBusy] = useState("");
   const [search, setSearch] = useState("");
@@ -196,11 +197,14 @@ export default function App() {
     try {
       setPromotionLoading(true);
       setPromotionError("");
+      setPromotionAvailabilityError("");
       const available = await api<Row[]>("/api/promotions");
       setPromotions(available);
       return available;
     } catch (reason) {
-      setPromotionError(reason instanceof Error ? reason.message : "Could not load promotions.");
+      const message = reason instanceof Error ? reason.message : "Could not load promotions.";
+      setPromotionAvailabilityError(message);
+      setPromotionError(message);
       return [];
     } finally {
       setPromotionLoading(false);
@@ -837,6 +841,7 @@ export default function App() {
                             promotions={promotions}
                             loading={promotionLoading}
                             error={promotionError}
+                            availabilityError={promotionAvailabilityError}
                             code={promotionCode}
                             busy={promotionBusy}
                             onCodeChange={setPromotionCode}
@@ -1013,6 +1018,7 @@ function PromotionControl({
   promotions,
   loading,
   error,
+  availabilityError,
   code,
   busy,
   onCodeChange,
@@ -1023,6 +1029,7 @@ function PromotionControl({
   promotions: Row[];
   loading: boolean;
   error: string;
+  availabilityError: string;
   code: string;
   busy: string;
   onCodeChange: (value: string) => void;
@@ -1030,7 +1037,7 @@ function PromotionControl({
   onRemove: () => void;
 }) {
   const applied = order.promotion;
-  const canApply = promotions.length === 0 || promotions.some((promotion) => promotion.can_apply !== false && promotion.active !== false && !["inactive", "expired", "scheduled", "exhausted"].includes(String(promotion.status || "").toLowerCase()));
+  const canApply = !availabilityError && promotions.length > 0 && promotions.some((promotion) => promotion.can_apply !== false && promotion.active !== false && !["inactive", "expired", "scheduled", "exhausted"].includes(String(promotion.status || "").toLowerCase()));
   const isReadOnly = promotions.length > 0 && !canApply;
   return (
     <section className="promotion-control" aria-label="Promotion">
@@ -1039,18 +1046,15 @@ function PromotionControl({
         {loading && <span className="promotion-state" role="status">Loading codes…</span>}
         {!loading && !error && !promotions.length && <span className="promotion-state" role="status">No active codes.</span>}
       </div>
-      {applied ? (
-        <div className="promotion-applied" role="status">
-          <div><strong>{applied.code}</strong><small>{applied.name || "Promotion applied"}</small></div>
-          <button className="text-button" type="button" onClick={onRemove} disabled={!!busy}>{busy.startsWith("promotion-remove") ? "Removing…" : "Remove promotion"}</button>
-        </div>
-      ) : (
-        <div className="promotion-form">
-          <label className="sr-only" htmlFor="promotion-code">Promotion code</label>
-          <input id="promotion-code" className="text-input" value={code} onChange={(event) => onCodeChange(event.target.value)} placeholder="Enter code" disabled={loading || !canApply || !!busy} />
-          <button aria-label="Apply promotion" className="action-button" type="button" onClick={onApply} disabled={loading || !canApply || !code.trim() || !!busy}>{busy.startsWith("promotion-apply") ? "Applying…" : "Apply promotion"}</button>
-        </div>
-      )}
+      {applied && <div className="promotion-applied" role="status">
+        <div><strong>{applied.code}</strong><small>{applied.name || "Promotion applied"}</small></div>
+        <button className="text-button" type="button" onClick={onRemove} disabled={!!busy}>{busy.startsWith("promotion-remove") ? "Removing…" : "Remove promotion"}</button>
+      </div>}
+      <div className="promotion-form">
+        <label className="sr-only" htmlFor="promotion-code">Promotion code</label>
+        <input id="promotion-code" className="text-input" value={code} onChange={(event) => onCodeChange(event.target.value)} placeholder="Enter code" disabled={loading || !canApply || !!busy} />
+        <button aria-label="Apply promotion" className="action-button" type="button" onClick={onApply} disabled={loading || !canApply || !code.trim() || !!busy}>{busy.startsWith("promotion-apply") ? "Applying…" : applied ? "Replace promotion" : "Apply promotion"}</button>
+      </div>
       {isReadOnly && <p className="promotion-permission" role="status">Promotion access is read-only for this operator.</p>}
       {error && <p className="promotion-error" role="alert">{error}</p>}
       {applied && <div className="promotion-pricing"><div><span>Discount</span><strong>−{money(order.discount_amount ?? applied.discount_amount)}</strong></div><div><span>Discounted subtotal</span><strong>{money(order.discounted_subtotal ?? applied.discounted_subtotal)}</strong></div></div>}
