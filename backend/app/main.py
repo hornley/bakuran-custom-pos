@@ -18,6 +18,7 @@ from .auth import (
     AuthMiddleware,
     initialize_auth,
     auth_enabled,
+    local_dev_bypass_enabled,
     record_event_in_connection,
     router as auth_router,
 )
@@ -686,7 +687,11 @@ def health():
 @app.get("/api/promotions")
 def promotions(request: Request):
     with connect() as c:
-        can_apply = not auth_module.auth_enabled() or bool(_promotion_roles(request) & {"admin", "manager", "operator"})
+        can_apply = (
+            bool(_promotion_roles(request) & {"admin", "manager", "operator"})
+            if auth_module.auth_enabled()
+            else local_dev_bypass_enabled()
+        )
         result = [promotion_view(row) for row in c.execute("SELECT * FROM promotions ORDER BY id DESC")]
         for promotion in result:
             promotion["can_apply"] = can_apply

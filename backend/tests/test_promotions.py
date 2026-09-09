@@ -117,6 +117,13 @@ def test_promotions_normalize_codes_list_status_and_bound_values(client):
         assert response.status_code == 422, response.text
 
 
+def test_disabled_auth_without_local_bypass_reports_promotions_as_read_only(client, monkeypatch):
+    monkeypatch.delenv("AUTH_LOCAL_DEV_BYPASS", raising=False)
+    response = client.get("/api/promotions")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 def test_editing_an_open_promoted_order_reprices_the_snapshot(client):
     create_promotion(client, value="5.00")
     order_id = start_order(client)
