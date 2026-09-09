@@ -10,6 +10,7 @@ export function isMockMode(): boolean {
 type MockState = {
   nextOrderId: number;
   nextCustomerOrderId: number;
+  nextAppliedPromotionId: number;
   orders: MockRow[];
   kitchen: MockRow[];
   payments: MockRow[];
@@ -18,6 +19,7 @@ type MockState = {
   purchases: MockRow[];
   receipts: MockRow[];
   taxConfiguration: MockRow;
+  promotions: MockRow[];
 };
 
 const menu = [
@@ -32,6 +34,7 @@ const menu = [
 const state: MockState = {
   nextOrderId: 105,
   nextCustomerOrderId: 501,
+  nextAppliedPromotionId: 1,
   orders: [],
   kitchen: [],
   payments: [],
@@ -40,6 +43,7 @@ const state: MockState = {
   purchases: [],
   receipts: [],
   taxConfiguration: { rules: [], effective_rule: null },
+  promotions: [],
 };
 
 const money = (value: number) => Number(value.toFixed(2));
@@ -67,11 +71,48 @@ function calculateMockTax(subtotal: number) {
   };
 }
 
+function promotionDiscount(promotion: MockRow, subtotal: number) {
+  const value = Number(promotion.value || 0);
+  const discount = promotion.discount_type === "percentage" || promotion.type === "percentage"
+    ? (subtotal * value) / 100
+    : value;
+  return money(Math.min(Math.max(discount, 0), subtotal));
+}
+
+function recalculateMockOrder(order: MockRow) {
+  const originalSubtotal = money((order.lines || []).reduce(
+    (sum: number, line: MockRow) => sum + Number(line.line_total || 0),
+    0,
+  ));
+  const discountAmount = order.promotion ? promotionDiscount(order.promotion, originalSubtotal) : 0;
+  const discountedSubtotal = money(Math.max(originalSubtotal - discountAmount, 0));
+  const shouldCalculateTax = order.status === "awaiting_payment" || !!order.promotion;
+  const tax = shouldCalculateTax ? calculateMockTax(discountedSubtotal) : {
+    policy: "none",
+    rate: "0.00",
+    name: "Tax",
+    taxable_subtotal: discountedSubtotal,
+    tax_amount: 0,
+    total: discountedSubtotal,
+  };
+  Object.assign(order, {
+    subtotal: originalSubtotal,
+    original_subtotal: originalSubtotal,
+    discount_amount: discountAmount,
+    discounted_subtotal: discountedSubtotal,
+    ...tax,
+  });
+  order.total = tax.total;
+}
+
 function orderView(order: MockRow): MockRow {
   const value = clone(order);
   const lines = value.lines || [];
   const subtotal = value.subtotal ?? lines.reduce((sum: number, line: MockRow) => sum + Number(line.line_total || 0), 0);
   value.subtotal = subtotal;
+  value.original_subtotal = value.original_subtotal ?? subtotal;
+  value.discount_amount = value.discount_amount ?? 0;
+  value.discounted_subtotal = value.discounted_subtotal ?? money(Number(value.original_subtotal) - Number(value.discount_amount));
   value.tax = value.tax || {
     policy: value.tax_policy || "none",
     rate: value.tax_rate || "0.00",
@@ -87,7 +128,24 @@ function orderView(order: MockRow): MockRow {
   value.taxable_subtotal = value.tax.taxable_subtotal;
   const ticket = state.kitchen.find((candidate) => candidate.order_id === value.id) || value.ticket || null;
   const delivery = state.deliveries.find((candidate) => candidate.order_id === value.id) || value.delivery || null;
-  return { order: value, lines: clone(lines), ticket: clone(ticket), payment: clone(value.payment || null), receipt: clone(value.receipt || null), delivery: clone(delivery), tax: clone(value.tax) };
+  if (value.promotion) delete value.promotion.idempotency_key;
+  delete value.promotion_remove_key;
+  return {
+    order: value,
+    lines: clone(lines),
+    ticket: clone(ticket),
+    payment: clone(value.payment || null),
+    receipt: clone(value.receipt || null),
+    delivery: clone(delivery),
+    tax: clone(value.tax),
+    promotion: clone(value.promotion || null),
+    pricing: {
+      original_subtotal: value.original_subtotal,
+      discount_amount: value.discount_amount,
+      discounted_subtotal: value.discounted_subtotal,
+      total: value.total,
+    },
+  };
 }
 
 function seedOrders() {
@@ -115,17 +173,22 @@ function seedOrders() {
   state.purchases = [{ id: 1, purchase_number: "PUR-0004", supplier_name: "Local Food Supply", status: "ordered", total: 2450, lines: [{ id: 1, product_id: 1, warehouse_id: 1, product_name: "Chicken adobo", warehouse_code: "MAIN", received_quantity: 4, quantity: 10, unit_cost: 185 }] }];
   state.receipts = [{ id: 1, receipt_number: "REC-0100", order_number: "ORD-0100", table_code: "COUNTER", total: 430 }];
   state.taxConfiguration = { rules: [{ id: 1, name: "VAT", rate: "12.00", policy: "exclusive", effective_from: "2026-01-01" }], effective_rule: { id: 1, name: "VAT", rate: "12.00", policy: "exclusive" } };
+  state.promotions = [
+    { id: 1, code: "WELCOME20", name: "Welcome 20", discount_type: "percentage", value: "20.00", status: "active", active: true, can_apply: true, usage_count: 0, remaining_uses: null },
+    { id: 2, code: "SAVE50", name: "Save ₱50", discount_type: "fixed", value: "50.00", status: "active", active: true, can_apply: true, usage_count: 0, remaining_uses: null },
+  ];
 }
 
 export function resetMockData() {
   state.nextOrderId = 105;
   state.nextCustomerOrderId = 501;
+  state.nextAppliedPromotionId = 1;
   seedOrders();
 }
 
 function newCounterOrder(channel = "counter") {
   const id = state.nextOrderId++;
-  const order = { id, order_number: `ORD-${String(id).padStart(4, "0")}`, status: "open", order_channel: channel, customer_name: "", table_code: "COUNTER", subtotal: 0, total: 0, lines: [] as MockRow[] };
+  const order = { id, order_number: `ORD-${String(id).padStart(4, "0")}`, status: "open", order_channel: channel, customer_name: "", table_code: "COUNTER", subtotal: 0, original_subtotal: 0, discount_amount: 0, discounted_subtotal: 0, total: 0, promotion: null, lines: [] as MockRow[] };
   state.orders.unshift(order);
   return order;
 }
@@ -141,7 +204,12 @@ function parseJson(options?: RequestInit): MockRow {
 export async function mockApi<T = any>(path: string, options?: RequestInit): Promise<T> {
   const [pathname, query = ""] = path.split("?");
   const params = new URLSearchParams(query);
-  if (pathname === "/api/menu" || pathname === "/api/catalog") return clone(menu) as T;
+  const method = String(options?.method || "GET").toUpperCase();
+  if (pathname === "/api/promotions") {
+    if (method === "GET") return clone(state.promotions) as T;
+    throw new Error(`Unknown mock mutation: ${method} ${pathname}`);
+  }
+  if ((pathname === "/api/menu" || pathname === "/api/catalog") && method === "GET") return clone(menu) as T;
   if (pathname === "/api/kitchen") return clone(params.get("queue") === "ready" ? state.kitchen.filter((ticket) => ["ready", "served"].includes(ticket.status)) : state.kitchen.filter((ticket) => ticket.status !== "served")) as T;
   if (pathname === "/api/payment-queue") {
     const search = params.get("q")?.toLowerCase() || "";
@@ -264,6 +332,45 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     return clone({ order, lines, table: { table_code: "T06", table_name: "Table 6" } }) as T;
   }
   if (pathname === "/api/counter/orders" && options?.method === "POST") return clone(orderView(newCounterOrder(parseJson(options).order_channel || "counter"))) as T;
+  const promotionApplyMatch = pathname.match(/^\/api\/orders\/(\d+)\/promotions$/);
+  if (promotionApplyMatch && method === "POST") {
+    const order = findOrder(Number(promotionApplyMatch[1]));
+    if (!order) throw new Error("Order not found");
+    if (!Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "idempotency-key")) throw new Error("Idempotency-Key is required");
+    if (!["manual", "counter", "delivery"].includes(String(order.order_channel || "counter"))) throw new Error("Promotions are unavailable for this order");
+    const payload = parseJson(options);
+    const code = String(payload.code || "").trim().toUpperCase();
+    const idempotencyKey = Object.entries(options?.headers || {}).find(([key]) => key.toLowerCase() === "idempotency-key")?.[1];
+    if (order.promotion?.idempotency_key && order.promotion.idempotency_key === idempotencyKey) return clone(orderView(order)) as T;
+    const promotion = state.promotions.find((candidate) => candidate.code === code && candidate.active !== false);
+    if (!promotion) throw new Error("Promotion code is not available");
+    if (order.promotion && order.promotion.code === code) return clone(orderView(order)) as T;
+    const applied = {
+      ...clone(promotion),
+      id: state.nextAppliedPromotionId++,
+      applied_id: state.nextAppliedPromotionId - 1,
+      idempotency_key: idempotencyKey,
+      discount_amount: promotionDiscount(promotion, Number(order.subtotal || 0)),
+      discounted_subtotal: money(Math.max(Number(order.subtotal || 0) - promotionDiscount(promotion, Number(order.subtotal || 0)), 0)),
+    };
+    order.promotion = applied;
+    recalculateMockOrder(order);
+    order.promotion = { ...applied, discount_amount: order.discount_amount, discounted_subtotal: order.discounted_subtotal };
+    return clone(orderView(order)) as T;
+  }
+  const promotionRemoveMatch = pathname.match(/^\/api\/orders\/(\d+)\/promotions\/(\d+)$/);
+  if (promotionRemoveMatch && method === "DELETE") {
+    const order = findOrder(Number(promotionRemoveMatch[1]));
+    if (!order) throw new Error("Order not found");
+    if (!Object.keys(options?.headers || {}).some((key) => key.toLowerCase() === "idempotency-key")) throw new Error("Idempotency-Key is required");
+    const idempotencyKey = Object.entries(options?.headers || {}).find(([key]) => key.toLowerCase() === "idempotency-key")?.[1];
+    if (!order.promotion && order.promotion_remove_key === idempotencyKey) return clone(orderView(order)) as T;
+    if (!order.promotion || ![Number(promotionRemoveMatch[2]), Number(order.promotion.applied_id)].includes(Number(order.promotion.id))) throw new Error("Applied promotion not found");
+    order.promotion = null;
+    order.promotion_remove_key = idempotencyKey;
+    recalculateMockOrder(order);
+    return clone(orderView(order)) as T;
+  }
   const kitchenMatch = pathname.match(/^\/api\/kitchen\/(\d+)\/(start|ready|serve)$/);
   if (kitchenMatch && options?.method === "POST") {
     const ticket = state.kitchen.find((candidate) => candidate.id === Number(kitchenMatch[1]));
@@ -290,14 +397,13 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
       } else {
         order.lines.push({ id: Date.now(), menu_item_id: item.id, item_name: item.name, quantity, unit_price: item.price, line_total: item.price * quantity });
       }
-      order.subtotal = order.lines.reduce((sum: number, line: MockRow) => sum + line.line_total, 0);
-      order.total = order.subtotal;
+      recalculateMockOrder(order);
       return clone(orderView(order)) as T;
     }
     if (action === "confirm") {
       order.customer_name = parseJson(options).customer_name;
-      const tax = calculateMockTax(Number(order.subtotal || 0));
-      Object.assign(order, tax, { status: "awaiting_payment" });
+      Object.assign(order, { status: "awaiting_payment" });
+      recalculateMockOrder(order);
       const pendingDelivery = state.deliveries.find((candidate) => candidate.order_id === order.id);
       if (pendingDelivery) Object.assign(pendingDelivery, { customer_name: order.customer_name, order_total: order.total });
       return clone(orderView(order)) as T;
@@ -321,6 +427,7 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     state.receipts.unshift({ id: order.id, receipt_number: order.receipt.receipt_number, order_number: order.order_number, table_code: order.table_code, total: order.total });
     return clone(orderView(order)) as T;
   }
+  if (method !== "GET") throw new Error(`Unknown mock mutation: ${method} ${pathname}`);
   return clone([]) as T;
 }
 

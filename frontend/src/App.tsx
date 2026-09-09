@@ -103,6 +103,11 @@ export default function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [secondary, setSecondary] = useState<Record<string, any>>({});
+  const [promotions, setPromotions] = useState<Row[]>([]);
+  const [promotionLoading, setPromotionLoading] = useState(false);
+  const [promotionError, setPromotionError] = useState("");
+  const [promotionCode, setPromotionCode] = useState("");
+  const [promotionBusy, setPromotionBusy] = useState("");
   const [search, setSearch] = useState("");
   const [operationsWarehouse, setOperationsWarehouse] = useState(1);
   const secondaryRequest = useRef(0);
@@ -126,10 +131,12 @@ export default function App() {
     if (pendingOperationKeys.current.get(operationId) === key) pendingOperationKeys.current.delete(operationId);
   }
 
-  async function mutate<T>(operationId: string, prefix: string, path: string, method: string, payload: Row) {
+  async function mutate<T>(operationId: string, prefix: string, path: string, method: string, payload: Row, includeBodyIdempotency = true) {
     const key = operationKey(operationId, prefix);
     try {
-      const result = await api<T>(path, { method, body: JSON.stringify({ ...payload, idempotency_key: key }) });
+      const headers = { "Idempotency-Key": key };
+      const body = includeBodyIdempotency ? { ...payload, idempotency_key: key } : payload;
+      const result = await api<T>(path, { method, headers, body: JSON.stringify(body) });
       clearOperationKey(operationId, key);
       return result;
     } catch (reason) {
@@ -148,6 +155,7 @@ export default function App() {
 
   function applyOrderPayload(payload: Row) {
     if (!payload?.order) return;
+    const promotion = payload.promotion ?? payload.order.promotion ?? null;
     setCurrentOrder({
       ...payload.order,
       lines: payload.lines || [],
@@ -156,7 +164,12 @@ export default function App() {
       receipt: payload.receipt || null,
       tax: payload.tax || null,
       delivery: payload.delivery || null,
+      promotion,
     });
+    if (promotion) {
+      setPromotionError("");
+      setPromotionCode("");
+    }
     if (payload.order.customer_name) setCustomerName(payload.order.customer_name);
     if (payload.delivery) {
       setDeliveryAddress(payload.delivery.address || "");
@@ -176,6 +189,21 @@ export default function App() {
       throw reason;
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function loadPromotions() {
+    try {
+      setPromotionLoading(true);
+      setPromotionError("");
+      const available = await api<Row[]>("/api/promotions");
+      setPromotions(available);
+      return available;
+    } catch (reason) {
+      setPromotionError(reason instanceof Error ? reason.message : "Could not load promotions.");
+      return [];
+    } finally {
+      setPromotionLoading(false);
     }
   }
 
@@ -201,6 +229,7 @@ export default function App() {
       setError("");
       setNotice("");
       if (!menu.length) await loadMenu();
+      if (!promotions.length) await loadPromotions();
       const forceNew = !!currentOrder && String(currentOrder.status) !== "open";
       if (forceNew) {
         setCurrentOrder(null);
@@ -210,6 +239,8 @@ export default function App() {
         setDeliveryContact("");
         setDeliveryContactName("");
         setQuantities({});
+        setPromotionCode("");
+        setPromotionError("");
       }
       await ensureOrder(forceNew);
       setCompletedReceipt(null);
@@ -236,6 +267,9 @@ export default function App() {
       setDeliveryContact("");
       setDeliveryContactName("");
       setQuantities({});
+      setPromotionCode("");
+      setPromotionError("");
+      if (!promotions.length) await loadPromotions();
       if (!menu.length) await loadMenu();
       const payload = await api<Row>("/api/counter/orders", { method: "POST", body: JSON.stringify({ order_channel: "delivery" }) });
       applyOrderPayload(payload);
@@ -249,6 +283,43 @@ export default function App() {
     } finally {
       startingOrderRef.current = false;
       setBusy("");
+    }
+  }
+
+  async function applyPromotion() {
+    if (!currentOrder || !promotionCode.trim()) return;
+    const code = promotionCode.trim();
+    const operationId = `promotion-apply-${currentOrder.id}`;
+    try {
+      setPromotionBusy(operationId);
+      setPromotionError("");
+      setError("");
+      const payload = await mutate<Row>(operationId, "promotion", `/api/orders/${currentOrder.id}/promotions`, "POST", { code }, false);
+      applyOrderPayload(payload);
+      setPromotionCode("");
+      setNotice("Promotion applied.");
+    } catch (reason) {
+      setPromotionError(reason instanceof Error ? reason.message : "Could not apply this promotion.");
+    } finally {
+      setPromotionBusy("");
+    }
+  }
+
+  async function removePromotion() {
+    if (!currentOrder?.promotion) return;
+    const appliedId = currentOrder.promotion.id ?? currentOrder.promotion.applied_id;
+    const operationId = `promotion-remove-${currentOrder.id}-${appliedId}`;
+    try {
+      setPromotionBusy(operationId);
+      setPromotionError("");
+      setError("");
+      const payload = await mutate<Row>(operationId, "promotion-remove", `/api/orders/${currentOrder.id}/promotions/${appliedId}`, "DELETE", {}, false);
+      applyOrderPayload(payload);
+      setNotice("Promotion removed.");
+    } catch (reason) {
+      setPromotionError(reason instanceof Error ? reason.message : "Could not remove this promotion.");
+    } finally {
+      setPromotionBusy("");
     }
   }
 
@@ -366,6 +437,9 @@ export default function App() {
     setDeliveryContact("");
     setDeliveryContactName("");
     setQuantities({});
+    setPromotionCode("");
+    setPromotionError("");
+    setPromotionBusy("");
     setStep("build");
     setView("order");
     setError("");
@@ -378,6 +452,9 @@ export default function App() {
     setStep("build");
     setError("");
     setNotice("");
+    setPromotionCode("");
+    setPromotionError("");
+    setPromotionBusy("");
   }
 
   async function loadSecondary(target: View, warehouseId = operationsWarehouse) {
@@ -755,6 +832,17 @@ export default function App() {
                           ) : (
                             <div className="basket-start"><div className="basket-icon">+</div><strong>Add items to begin.</strong></div>
                           )}
+                          {hasItems && <PromotionControl
+                            order={currentOrder || {}}
+                            promotions={promotions}
+                            loading={promotionLoading}
+                            error={promotionError}
+                            code={promotionCode}
+                            busy={promotionBusy}
+                            onCodeChange={setPromotionCode}
+                            onApply={() => void applyPromotion()}
+                            onRemove={() => void removePromotion()}
+                          />}
                           <div className="button-row basket-actions">
                             <button className="action-button primary" disabled={!hasItems || !!busy} onClick={() => setStep("confirm")}>Review order</button>
                           </div>
@@ -906,7 +994,7 @@ function EntryChoice({ onManual, onQr, busy }: { onManual: () => void; onQr: () 
 function TaxBreakdown({ order }: { order: Row }) {
   const tax = order.tax || {};
   const policy = String(tax.policy ?? order.tax_policy ?? "none");
-  const taxableSubtotal = tax.taxable_subtotal ?? order.taxable_subtotal ?? order.subtotal ?? 0;
+  const taxableSubtotal = tax.taxable_subtotal ?? order.taxable_subtotal ?? order.discounted_subtotal ?? order.subtotal ?? 0;
   const taxAmount = tax.tax_amount ?? order.tax_amount ?? 0;
   const total = tax.total ?? order.total ?? 0;
   const rate = tax.rate ?? order.tax_rate;
@@ -917,6 +1005,56 @@ function TaxBreakdown({ order }: { order: Row }) {
       <div className="tax-breakdown-row"><span>{policy === "none" ? "Tax" : `${name} (${rate}%)`}</span><strong>{money(taxAmount)}</strong></div>
       <div className="tax-breakdown-row tax-breakdown-total"><span>Total</span><strong>{money(total)}</strong></div>
     </div>
+  );
+}
+
+function PromotionControl({
+  order,
+  promotions,
+  loading,
+  error,
+  code,
+  busy,
+  onCodeChange,
+  onApply,
+  onRemove,
+}: {
+  order: Row;
+  promotions: Row[];
+  loading: boolean;
+  error: string;
+  code: string;
+  busy: string;
+  onCodeChange: (value: string) => void;
+  onApply: () => void;
+  onRemove: () => void;
+}) {
+  const applied = order.promotion;
+  const canApply = promotions.length === 0 || promotions.some((promotion) => promotion.can_apply !== false && promotion.active !== false && !["inactive", "expired", "scheduled", "exhausted"].includes(String(promotion.status || "").toLowerCase()));
+  const isReadOnly = promotions.length > 0 && !canApply;
+  return (
+    <section className="promotion-control" aria-label="Promotion">
+      <div className="promotion-heading">
+        <div><span className="eyebrow">Optional</span><h3>Promotion code</h3></div>
+        {loading && <span className="promotion-state" role="status">Loading codes…</span>}
+        {!loading && !error && !promotions.length && <span className="promotion-state" role="status">No active codes.</span>}
+      </div>
+      {applied ? (
+        <div className="promotion-applied" role="status">
+          <div><strong>{applied.code}</strong><small>{applied.name || "Promotion applied"}</small></div>
+          <button className="text-button" type="button" onClick={onRemove} disabled={!!busy}>{busy.startsWith("promotion-remove") ? "Removing…" : "Remove promotion"}</button>
+        </div>
+      ) : (
+        <div className="promotion-form">
+          <label className="sr-only" htmlFor="promotion-code">Promotion code</label>
+          <input id="promotion-code" className="text-input" value={code} onChange={(event) => onCodeChange(event.target.value)} placeholder="Enter code" disabled={loading || !canApply || !!busy} />
+          <button aria-label="Apply promotion" className="action-button" type="button" onClick={onApply} disabled={loading || !canApply || !code.trim() || !!busy}>{busy.startsWith("promotion-apply") ? "Applying…" : "Apply promotion"}</button>
+        </div>
+      )}
+      {isReadOnly && <p className="promotion-permission" role="status">Promotion access is read-only for this operator.</p>}
+      {error && <p className="promotion-error" role="alert">{error}</p>}
+      {applied && <div className="promotion-pricing"><div><span>Discount</span><strong>−{money(order.discount_amount ?? applied.discount_amount)}</strong></div><div><span>Discounted subtotal</span><strong>{money(order.discounted_subtotal ?? applied.discounted_subtotal)}</strong></div></div>}
+    </section>
   );
 }
 

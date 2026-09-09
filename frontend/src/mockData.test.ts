@@ -190,4 +190,56 @@ describe("mock visual data", () => {
     expect(updated.on_hand).toBe(target.on_hand + 2);
     expect(updated.reorder_level).toBe(12);
   });
+
+  it("applies and removes a promotion in the stateful mock order view", async () => {
+    const started = await mockApi<any>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
+    await mockApi<any>(`/api/orders/${started.order.id}/lines`, {
+      method: "POST",
+      body: JSON.stringify({ menu_item_id: 1, quantity: 1 }),
+    });
+    const promotions = await mockApi<any[]>("/api/promotions");
+    const applied = await mockApi<any>(`/api/orders/${started.order.id}/promotions`, {
+      method: "POST",
+      headers: { "Idempotency-Key": "promotion-test-1" },
+      body: JSON.stringify({ code: promotions[0].code }),
+    });
+
+    expect(promotions.length).toBeGreaterThan(0);
+    expect(applied.promotion.code).toBe(promotions[0].code);
+    expect(Number(applied.promotion.discount_amount)).toBeGreaterThan(0);
+    expect(Number(applied.order.discounted_subtotal)).toBeLessThan(Number(applied.order.original_subtotal));
+    expect(Number(applied.tax.tax_amount)).toBeGreaterThan(0);
+    expect(Number(applied.order.total)).toBe(Number(applied.tax.total));
+
+    const removed = await mockApi<any>(`/api/orders/${started.order.id}/promotions/${applied.promotion.id}`, {
+      method: "DELETE",
+      headers: { "Idempotency-Key": "promotion-remove-test-1" },
+    });
+    expect(removed.promotion).toBeNull();
+    expect(Number(removed.order.discount_amount)).toBe(0);
+    expect(Number(removed.order.discounted_subtotal)).toBe(Number(removed.order.original_subtotal));
+  });
+
+  it("reuses a mock promotion application without creating another applied snapshot", async () => {
+    const started = await mockApi<any>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
+    await mockApi<any>(`/api/orders/${started.order.id}/lines`, { method: "POST", body: JSON.stringify({ menu_item_id: 1, quantity: 1 }) });
+    const request = { method: "POST", headers: { "Idempotency-Key": "promotion-same-1" }, body: JSON.stringify({ code: "WELCOME20" }) };
+    const first = await mockApi<any>(`/api/orders/${started.order.id}/promotions`, request);
+    const retry = await mockApi<any>(`/api/orders/${started.order.id}/promotions`, request);
+
+    expect(retry).toEqual(first);
+    expect(retry.promotion.id).toBe(first.promotion.id);
+  });
+
+  it("requires idempotency keys for mock promotion mutations", async () => {
+    const started = await mockApi<any>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
+    await expect(mockApi(`/api/orders/${started.order.id}/promotions`, {
+      method: "POST",
+      body: JSON.stringify({ code: "WELCOME20" }),
+    })).rejects.toThrow(/idempotency-key/i);
+  });
+
+  it("throws instead of silently accepting an unknown mock mutation", async () => {
+    await expect(mockApi("/api/promotions", { method: "PATCH" })).rejects.toThrow(/unknown mock mutation/i);
+  });
 });

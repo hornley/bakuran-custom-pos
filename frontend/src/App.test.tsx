@@ -428,4 +428,116 @@ describe("counter operational flows", () => {
     expect(container.querySelector<HTMLInputElement>("#delivery-contact-name")!.value).toBe("");
     await act(async () => root.unmount());
   });
+
+  it("keeps promotion retries idempotent and renders the discounted order pricing", async () => {
+    const line = { id: 1, item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 };
+    const appliedOrder = {
+      ...order,
+      status: "open",
+      subtotal: 12,
+      original_subtotal: 12,
+      discount_amount: 2.4,
+      discounted_subtotal: 9.6,
+      total: 10.56,
+      lines: [line],
+      promotion: { applied_id: 11, code: "WELCOME20", name: "Welcome 20", discount_amount: 2.4, discounted_subtotal: 9.6 },
+      tax: { policy: "exclusive", rate: "10.00", name: "VAT", taxable_subtotal: 9.6, tax_amount: 0.96, total: 10.56 },
+    };
+    const requests: Array<{ url: string; options?: RequestInit }> = [];
+    let promotionAttempts = 0;
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      requests.push({ url, options });
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
+      if (url.endsWith("/api/promotions")) return response([{ code: "WELCOME20", name: "Welcome 20", type: "percentage", value: 20, can_apply: true }]);
+      if (url.endsWith("/lines")) return response({ order: { ...order, id: 7, total: 12, subtotal: 12 }, lines: [line] });
+      if (url.includes("/api/orders/") && url.endsWith("/promotions") && options?.method === "POST") {
+        promotionAttempts += 1;
+        if (promotionAttempts === 1) return Promise.reject(new Error("Connection closed before the response"));
+        return response({ ...appliedOrder, order: { ...appliedOrder, promotion: appliedOrder.promotion } });
+      }
+      if (url.includes("/api/orders/") && url.endsWith("/promotions/11") && options?.method === "DELETE") return response({ ...appliedOrder, promotion: null, order: { ...appliedOrder, promotion: null, discount_amount: 0, discounted_subtotal: 12, total: 13.2 }, tax: { ...appliedOrder.tax, taxable_subtotal: 12, tax_amount: 1.2, total: 13.2 } });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+
+    expect(requests.some(({ url }) => url.endsWith("/api/promotions"))).toBe(false);
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    expect(requests.some(({ url }) => url.endsWith("/api/promotions"))).toBe(true);
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+
+    const code = container.querySelector<HTMLInputElement>("#promotion-code")!;
+    await act(async () => { setInputValue?.call(code, "WELCOME20"); code.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => button(container, "Apply promotion").click());
+    await settle();
+    await act(async () => button(container, "Apply promotion").click());
+    await settle();
+
+    const promotionRequests = requests.filter(({ url, options }) => url.includes("/api/orders/") && url.endsWith("/promotions") && options?.method === "POST");
+    expect(promotionRequests).toHaveLength(2);
+    expect(JSON.parse(String(promotionRequests[0].options?.body))).toEqual({ code: "WELCOME20" });
+    expect(promotionRequests[0].options?.headers).toEqual(expect.objectContaining({ "Idempotency-Key": expect.any(String) }));
+    expect(promotionRequests[1].options?.headers).toEqual(expect.objectContaining({ "Idempotency-Key": promotionRequests[0].options?.headers && (promotionRequests[0].options?.headers as Record<string, string>)["Idempotency-Key"] }));
+    expect(container.textContent).toContain("WELCOME20");
+    expect(container.textContent).toContain("Discounted subtotal");
+    expect(container.textContent).toContain("₱2.40");
+    expect(container.textContent).toContain("₱9.60");
+    expect(container.textContent).toContain("₱10.56");
+
+    await act(async () => button(container, "Remove promotion").click());
+    await settle();
+    expect(requests.some(({ url, options }) => url.includes("/api/orders/") && url.endsWith("/promotions/11") && options?.method === "DELETE")).toBe(true);
+    expect(container.textContent).not.toContain("WELCOME20");
+    await act(async () => root.unmount());
+  });
+
+  it("shows a read-only promotion state when the operator lacks permission", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
+      if (url.endsWith("/api/promotions")) return response([{ code: "MANAGER10", name: "Manager ten", can_apply: false, status: "active" }]);
+      if (url.endsWith("/lines")) return response({ order: { ...order, total: 12, subtotal: 12 }, lines: [{ item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }] });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+
+    expect(container.textContent).toContain("Promotion access is read-only for this operator.");
+    expect(container.querySelector<HTMLButtonElement>("button[aria-label=\"Apply promotion\"]")?.disabled).toBe(true);
+    await act(async () => root.unmount());
+  });
+
+  it("keeps a promotion error visible and preserves the basket", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) return response({ order, lines: [] });
+      if (url.endsWith("/api/promotions")) return response([{ code: "EXPIRED", name: "Expired", can_apply: true }]);
+      if (url.endsWith("/lines")) return response({ order: { ...order, id: 7, total: 12, subtotal: 12 }, lines: [{ item_name: "Adobo", quantity: 1, unit_price: 12, line_total: 12 }] });
+      if (url.includes("/api/orders/") && url.endsWith("/promotions")) return response({ detail: "Promotion has expired" }, false);
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    await act(async () => container.querySelector<HTMLElement>('[aria-label="Add Adobo to order"]')!.click());
+    await settle();
+    const code = container.querySelector<HTMLInputElement>("#promotion-code")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => { setInputValue?.call(code, "EXPIRED"); code.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => button(container, "Apply promotion").click());
+    await settle();
+
+    expect(container.textContent).toContain("Promotion has expired");
+    expect(container.textContent).toContain("Adobo");
+    expect(container.textContent).toContain("Choose items");
+    await act(async () => root.unmount());
+  });
 });
