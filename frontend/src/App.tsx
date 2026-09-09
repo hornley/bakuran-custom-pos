@@ -185,8 +185,8 @@ export default function App() {
     return payload;
   }
 
-  async function ensureOrder() {
-    if (currentOrder) return currentOrder;
+  async function ensureOrder(forceNew = false) {
+    if (currentOrder && !forceNew) return currentOrder;
     const payload = await api<Row>("/api/counter/orders", { method: "POST", body: JSON.stringify({}) });
     applyOrderPayload(payload);
     setOrderMode("manual");
@@ -201,7 +201,17 @@ export default function App() {
       setError("");
       setNotice("");
       if (!menu.length) await loadMenu();
-      await ensureOrder();
+      const forceNew = !!currentOrder && String(currentOrder.status) !== "open";
+      if (forceNew) {
+        setCurrentOrder(null);
+        setOrderMode(null);
+        setCustomerName("");
+        setDeliveryAddress("");
+        setDeliveryContact("");
+        setDeliveryContactName("");
+        setQuantities({});
+      }
+      await ensureOrder(forceNew);
       setCompletedReceipt(null);
       setShowEntryChoice(false);
       setStep("build");

@@ -45,6 +45,28 @@ describe("counter operational flows", () => {
     expect(resolveApiBase({ protocol: "http:", hostname: "100.108.61.26" })).toBe("http://100.108.61.26:5300");
   });
 
+  it("starts a fresh counter order when New order is selected again", async () => {
+    let createdOrders = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) {
+        createdOrders += 1;
+        return response({ order: { ...order, id: createdOrders, order_number: `BK-00${createdOrders}`, status: createdOrders === 1 ? "paid" : "open" }, lines: [] });
+      }
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    expect(createdOrders).toBe(1);
+
+    await act(async () => button(container, "New order").click());
+    await settle();
+    expect(createdOrders).toBe(2);
+    await act(async () => root.unmount());
+  });
+
   it("renders the premium operator shell with explicit service states", async () => {
     const fetchMock = vi.fn((url: string) => response(url.endsWith("/api/menu") ? menu : []));
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
