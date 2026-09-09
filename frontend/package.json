@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "vitest run",
+    "test": "NODE_ENV=development vitest run",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

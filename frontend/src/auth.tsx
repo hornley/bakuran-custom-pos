@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { isMockMode } from "./mockData";
 
 const API_BASE = import.meta.env.VITE_API_URL || (typeof window !== "undefined" ? `${window.location.protocol}//${window.location.hostname}:5300` : "http://localhost:5300");
 type Session = { authenticated: boolean; auth_enabled: boolean; user?: { username: string; roles: string[] } };
@@ -28,6 +29,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    if (isMockMode()) {
+      setStatus("ready");
+      return;
+    }
     void sessionRequest("/api/auth/session")
       .then((value) => { setSession(value); setStatus(value.auth_enabled && !value.authenticated ? "login" : "ready"); })
       .catch((reason: any) => { setStatus(reason?.status === 401 ? "login" : "ready"); });
@@ -52,6 +57,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   if (status === "loading") return <div className="panel state">Checking operator session…</div>;
+  if (isMockMode()) return <>{children}</>;
   if (status === "login") return <main className="main"><section className="panel auth-panel"><span className="eyebrow">Local operator access</span><h1>Sign in to continue.</h1><p>Use the bootstrap credentials configured for this local deployment.</p><form onSubmit={submit}><label>Username<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label><label>Password<input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <div className="banner error"><strong>Could not sign in</strong><span>{error}</span></div>}<button className="action-button" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button></form></section></main>;
   if (session?.auth_enabled && session.authenticated && session.user) return <><div style={{ display: "flex", justifyContent: "flex-end", gap: 12, padding: "10px 24px", fontSize: 13 }}><span>Signed in as <strong>{session.user.username}</strong> · {session.user.roles.join(", ")}</span><button onClick={() => void signOut()} disabled={busy}>{busy ? "Signing out…" : "Sign out"}</button></div>{children}</>;
   return <>{children}</>;

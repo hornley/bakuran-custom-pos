@@ -1,6 +1,7 @@
-import { useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import "./styles.css";
 import { csrfHeaders } from "./auth";
+import { isMockMode, mockApi } from "./mockData";
 
 type Row = Record<string, any>;
 type Step = "build" | "confirm" | "payment" | "fulfillment";
@@ -8,8 +9,14 @@ type View = "order" | "payments" | "kitchen" | "ready" | "delivery" | "operation
 type DeliveryAction = "assign" | "out-for-delivery" | "delivered" | "failed" | "cancel";
 type OrderMode = "manual" | "qr" | "delivery" | null;
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5300";
+export function resolveApiBase(location?: Pick<Location, "protocol" | "hostname">) {
+  const current = location || (typeof window !== "undefined" ? window.location : { protocol: "http:", hostname: "localhost" });
+  return `${current.protocol}//${current.hostname}:5300`;
+}
+
+const API_BASE = import.meta.env.VITE_API_URL || resolveApiBase();
 const PROJECT_NAME = "Bakuran POS";
+const todayLabel = new Intl.DateTimeFormat("en-US", { dateStyle: "full" }).format(new Date());
 const steps: Array<[Step, string]> = [
   ["build", "Basket"],
   ["confirm", "Customer"],
@@ -19,6 +26,7 @@ const steps: Array<[Step, string]> = [
 
 const titles: Record<View, [string, string]> = {
   order: ["", ""],
+
   payments: ["02 / Payment", "QR orders"],
   kitchen: ["03 / Kitchen", "Kitchen"],
   ready: ["04 / Pickup", "Ready"],
@@ -28,6 +36,7 @@ const titles: Record<View, [string, string]> = {
 type ApiError = Error & { responseReceived?: boolean };
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
+  if (isMockMode()) return mockApi<T>(path, options);
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: "include",
@@ -42,7 +51,7 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   return body as T;
 }
 
-const money = (value: any) => `$${Number(value || 0).toFixed(2)}`;
+const money = (value: any) => `₱${Number(value || 0).toFixed(2)}`;
 const label = (value: any) => String(value ?? "").replaceAll("_", " ");
 const newOperationKey = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -88,6 +97,8 @@ export default function App() {
   const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(false);
   const [secondaryLoading, setSecondaryLoading] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewQueueError, setOverviewQueueError] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -95,7 +106,13 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [operationsWarehouse, setOperationsWarehouse] = useState(1);
   const secondaryRequest = useRef(0);
+  const overviewRequest = useRef(0);
   const pendingOperationKeys = useRef(new Map<string, string>());
+  const startingOrderRef = useRef(false);
+
+  useEffect(() => {
+    loadOverviewQueues();
+  }, []);
 
   function operationKey(operationId: string, prefix: string) {
     const pending = pendingOperationKeys.current.get(operationId);
@@ -177,6 +194,8 @@ export default function App() {
   }
 
   async function startOrder() {
+    if (startingOrderRef.current || busy) return;
+    startingOrderRef.current = true;
     try {
       setBusy("start");
       setError("");
@@ -190,11 +209,14 @@ export default function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not start a new order.");
     } finally {
+      startingOrderRef.current = false;
       setBusy("");
     }
   }
 
   async function startDeliveryOrder() {
+    if (startingOrderRef.current || busy) return;
+    startingOrderRef.current = true;
     try {
       setBusy("delivery-start");
       setError("");
@@ -215,6 +237,7 @@ export default function App() {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not start a delivery order.");
     } finally {
+      startingOrderRef.current = false;
       setBusy("");
     }
   }
@@ -352,6 +375,7 @@ export default function App() {
     const requestId = ++secondaryRequest.current;
     try {
       setSecondaryLoading(true);
+
       const path = target === "payments"
         ? `/api/payment-queue${search ? `?q=${encodeURIComponent(search)}` : ""}`
         : target === "ready"
@@ -402,6 +426,25 @@ export default function App() {
     } finally {
       if (requestId === secondaryRequest.current) setSecondaryLoading(false);
     }
+  }
+
+  function loadOverviewQueues() {
+    const requestId = ++overviewRequest.current;
+    setOverviewLoading(true);
+    setOverviewQueueError("");
+    void Promise.all([
+      api<Row[]>("/api/kitchen"),
+      api<Row[]>("/api/kitchen?queue=ready"),
+      api<Row[]>("/api/payment-queue"),
+    ]).then(([kitchen, ready, payments]) => {
+      if (requestId !== overviewRequest.current) return;
+      setSecondary((current) => ({ ...current, kitchen, ready, payments: payments.filter((order) => order.status === "awaiting_payment") }));
+      setOverviewLoading(false);
+    }).catch(() => {
+      if (requestId !== overviewRequest.current) return;
+      setOverviewLoading(false);
+      setOverviewQueueError("Live service status is temporarily unavailable.");
+    });
   }
 
   async function inventoryAdjustment(values: Row) {
@@ -491,6 +534,7 @@ export default function App() {
   function navigate(target: View) {
     setView(target);
     setError("");
+    if (target === "order") loadOverviewQueues();
     if (target !== "order") void loadSecondary(target);
   }
 
@@ -537,13 +581,14 @@ export default function App() {
     }
   }
 
-  async function openSecondaryOrder(order: Row) {
+  async function openSecondaryOrder(order: Row, paymentQueue = false) {
     try {
       setError("");
       const payload = await refreshOrder(order.id || order.order_id);
-      const isPaymentQueue = view === "payments";
+      const isPaymentQueue = paymentQueue || view === "payments";
       setOrderMode(isPaymentQueue ? "qr" : payload.order.order_channel === "qr" ? "qr" : payload.order.order_channel === "delivery" ? "delivery" : "manual");
       setStep(isPaymentQueue ? "payment" : "fulfillment");
+      setShowEntryChoice(false);
       setView("order");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not open this order.");
@@ -565,42 +610,76 @@ export default function App() {
   const catalog = secondary.catalog || [];
   const suppliers = secondary.suppliers || [];
   const auditEvents = secondary.audit || [];
+  const attentionRows = [
+    ...paymentRows.map((order: Row) => ({ key: `payment-${order.id}`, order: order.order_number, orderMeta: `${order.lines?.length || 0} items · QR order`, customer: order.customer_name || order.table_code || "QR order", customerMeta: order.table_code || "Table order", status: order.status || "awaiting_payment", action: "Review & pay", onAction: () => void openSecondaryOrder(order, true) })),
+    ...kitchenRows.filter((ticket: Row) => !["ready", "served"].includes(ticket.status)).map((ticket: Row) => ({ key: `kitchen-${ticket.id}`, order: ticket.order_number, orderMeta: ticket.ticket_number || "Kitchen ticket", customer: ticket.customer_name || "Customer", customerMeta: ticket.table_code === "COUNTER" ? "Counter pickup" : ticket.table_code || "Pickup", status: ticket.status, action: "Open", onAction: () => void openSecondaryOrder({ ...ticket, id: ticket.order_id }) })),
+    ...readyRows.map((ticket: Row) => ({ key: `ready-${ticket.id}`, order: ticket.order_number, orderMeta: ticket.ticket_number || "Ready for pickup", customer: ticket.customer_name || "Customer", customerMeta: ticket.table_code === "COUNTER" ? "Counter pickup" : ticket.table_code || "Pickup desk", status: ticket.status, action: "Open", onAction: () => void openSecondaryOrder({ ...ticket, id: ticket.order_id }) })),
+  ].slice(0, 4);
 
   return (
-    <div className="shell">
-      <header className="topbar">
-        <div className="brand"><span className="brand-mark">BK</span><span>{PROJECT_NAME}</span></div>
-        <div className="topbar-right"><span className="topbar-note"><i className="live-dot" />{loading ? "Connecting" : "API ready"}</span></div>
-      </header>
-
-      <main className="main">
-        <section className="hero compact-hero">
-          <div>
-            <span className="eyebrow">Front desk</span>
-            <h1>Counter</h1>
-            <p>Start a new order or open a QR order awaiting payment.</p>
-          </div>
-          {currentOrder && (orderMode === "qr" || step === "fulfillment" || currentOrder.status === "closed") && (
-            <div className="hero-side">
-              <span className="hero-order">{currentOrder.order_number}<small>{label(orderStatus)}</small></span>
-            </div>
-          )}
-        </section>
-
-        <nav className="tabs" aria-label="Bakuran operations">
-          {([["order", "New order"], ["payments", "QR orders"], ["kitchen", "Kitchen"], ["ready", "Ready"], ["delivery", "Delivery"], ["operations", "Operations"]] as Array<[View, string]>).map(([key, text]) => (
-            <button className={view === key ? "active" : ""} key={key} onClick={() => navigate(key)}>{text}</button>
-          ))}
+    <div className="operator-shell">
+      <aside className="operator-rail" aria-label="Bakuran navigation">
+        <div className="rail-brand"><span className="brand-mark">BK</span><span>{PROJECT_NAME}</span></div>
+        <nav className="rail-nav" aria-label="Bakuran operations">
+          <span className="rail-label">Workspace</span>
+          <button className={`rail-link ${view === "order" && showEntryChoice ? "active" : ""}`} onClick={() => { setShowEntryChoice(true); setView("order"); loadOverviewQueues(); }}><span className="rail-icon" aria-hidden="true">O</span>Overview</button>
+          <span className="rail-label">Sell</span>
+          <button className={`rail-link ${view === "order" && !showEntryChoice ? "active" : ""}`} onClick={() => void startOrder()} disabled={busy === "start"}><span className="rail-icon" aria-hidden="true">＋</span>New order</button>
+          <button className={`rail-link ${view === "payments" ? "active" : ""}`} onClick={() => navigate("payments")}><span className="rail-icon" aria-hidden="true">QR</span>QR payments{paymentRows.length > 0 && <b>{paymentRows.length}</b>}</button>
+          <span className="rail-label">Fulfillment</span>
+          <button className={`rail-link ${view === "kitchen" ? "active" : ""}`} onClick={() => navigate("kitchen")}><span className="rail-icon" aria-hidden="true">K</span>Kitchen{(secondary.kitchen || []).length > 0 && <b>{(secondary.kitchen || []).length}</b>}</button>
+          <button className={`rail-link ${view === "ready" ? "active" : ""}`} onClick={() => navigate("ready")}><span className="rail-icon" aria-hidden="true">R</span>Ready{readyRows.length > 0 && <b>{readyRows.length}</b>}</button>
+          <span className="rail-label">Operations</span>
+          <button className={`rail-link ${view === "delivery" ? "active" : ""}`} onClick={() => navigate("delivery")}><span className="rail-icon" aria-hidden="true">D</span>Delivery{deliveryRows.length > 0 && <b>{deliveryRows.length}</b>}</button>
+          <button className={`rail-link ${view === "operations" ? "active" : ""}`} onClick={() => navigate("operations")}><span className="rail-icon" aria-hidden="true">Ops</span>Operations</button>
         </nav>
+        <div className="rail-shift"><span>Current shift</span><strong>Front desk · Current shift</strong></div>
+      </aside>
 
-        {error && <div className="banner error"><strong>Needs attention</strong><span>{error}</span><button onClick={() => setError("")}>Dismiss</button></div>}
-        {notice && <div className="banner notice"><strong>Saved</strong><span>{notice}</span><button onClick={() => setNotice("")}>Dismiss</button></div>}
+      <div className="operator-content">
+        <header className="topbar">
+          <div className="topbar-context"><span>{todayLabel}</span><span className="topbar-register">Cash desk · Local <i className="live-dot" />{overviewLoading ? "Checking" : overviewQueueError ? "Attention" : "Online"}</span>{isMockMode() && <span className="mock-badge">Preview data</span>}</div>
+          <div className="topbar-right"><span className="operator-avatar" aria-label="Current operator">OP</span></div>
+        </header>
+
+        <main className="main">
+          {view === "order" && showEntryChoice ? (
+            <section className="overview-view">
+              <div className="hero overview-hero">
+                <div><h1>Overview</h1></div>
+                <button className="action-button primary hero-action" onClick={() => void startOrder()} disabled={busy === "start"}>{busy === "start" ? "Starting…" : "New order"}</button>
+              </div>
+              <section className="service-strip" aria-label="Live service status">
+                <div className="service-cell active"><span>Front desk</span><strong>{overviewLoading ? "Checking status…" : overviewQueueError ? "Unavailable" : "Taking orders"}</strong></div>
+                <div className="service-cell"><span>Kitchen</span><strong>{overviewLoading ? "Checking status…" : overviewQueueError ? "Unavailable" : kitchenRows.length ? `${kitchenRows.length} in motion` : "Ready"}</strong></div>
+                <div className="service-cell"><span>Pickup</span><strong>{overviewLoading ? "Checking status…" : overviewQueueError ? "Unavailable" : readyRows.length ? `${readyRows.length} ready` : "Clear"}</strong></div>
+                <div className="service-cell"><span>Cash gate</span><strong>{overviewLoading ? "Checking status…" : overviewQueueError ? "Unavailable" : paymentRows.length ? `${paymentRows.length} to review` : "All clear"}</strong></div>
+              </section>
+              <section className="queue-surface" aria-labelledby="attention-heading">
+                <div className="surface-heading"><h2 id="attention-heading">Attention queue</h2><button className="text-button" onClick={() => navigate("kitchen")}>View kitchen</button></div>
+                <div className="queue-header"><span>Order</span><span>Customer / table</span><span>Status</span><span>Action</span></div>
+                {overviewLoading ? <div className="state" role="status">Loading live queue…</div> : overviewQueueError ? <div className="state" role="alert">{overviewQueueError}</div> : attentionRows.length ? <div role="list">{attentionRows.map((row) => <div className="queue-row" key={row.key} role="listitem"><div><strong>{row.order}</strong><small>{row.orderMeta}</small></div><div><strong>{row.customer}</strong><small>{row.customerMeta}</small></div><StatusPill value={row.status} /><button className={`row-action ${["ready", "served"].includes(row.status) ? "success" : ""}`} onClick={row.onAction}>{row.action}</button></div>)}</div> : <Empty>No orders need attention right now.</Empty>}
+              </section>
+              <div className="shortcut-panel"><button className="shortcut-tile" onClick={() => void startOrder()}><span className="shortcut-icon" aria-hidden="true">+</span><strong>Start order</strong></button><button className="shortcut-tile" onClick={() => navigate("payments")}><span className="shortcut-icon" aria-hidden="true">QR</span><strong>Review QR payments</strong></button><button className="shortcut-tile" onClick={() => navigate("delivery")}><span className="shortcut-icon" aria-hidden="true">D</span><strong>Open delivery</strong></button></div>
+            </section>
+          ) : (
+            <>
+              <section className="hero compact-hero">
+                <div><h1>{view === "order" ? "Build an order." : titles[view][1]}</h1></div>
+                {currentOrder && (orderMode === "qr" || step === "fulfillment" || currentOrder.status === "closed") && <div className="hero-side"><span className="hero-order">{currentOrder.order_number}<small>{label(orderStatus)}</small></span></div>}
+              </section>
+              <nav className={`tabs ${view === "order" ? "order-tabs" : ""}`} aria-label="Bakuran operations">
+                {([["order", "New order"], ["payments", "QR payments"], ["kitchen", "Kitchen"], ["ready", "Ready"], ["delivery", "Delivery"], ["operations", "Operations"]] as Array<[View, string]>).map(([key, text]) => <button className={view === key ? "active" : ""} key={key} onClick={() => navigate(key)}>{text}</button>)}
+              </nav>
+            </>
+          )}
+
+        {error && <div className="banner error" role="alert"><strong>Needs attention</strong><span>{error}</span><button onClick={() => setError("")}>Dismiss</button></div>}
+        {notice && <div className="banner notice" role="status"><strong>Saved</strong><span>{notice}</span><button onClick={() => setNotice("")}>Dismiss</button></div>}
 
         {view === "order" ? (
           <>
-            {showEntryChoice ? (
-              <EntryChoice onManual={() => void startOrder()} onQr={() => navigate("payments")} busy={busy === "start"} />
-            ) : (
+            {!showEntryChoice && (
               <>
                 <div className="flow-toolbar"><button className="text-button" onClick={backToOrderType}>Back to order type</button></div>
                 <section className="stepper" aria-label="Order progress">
@@ -614,7 +693,6 @@ export default function App() {
                 {completedReceipt ? (
                   <section className="success-card">
                     <div className="success-mark">✓</div>
-                    <span className="eyebrow">Complete</span>
                     <h2>Ready for the next customer.</h2>
                     <p>{currentOrder?.customer_name || "Customer"} · {currentOrder?.order_number}</p>
                     <TaxBreakdown order={{ ...(currentOrder || {}), ...(completedReceipt || {}) }} />
@@ -626,8 +704,8 @@ export default function App() {
                     {step === "build" && (
                       <section className="flow-grid">
                         <section className="panel menu-panel">
-                          <div className="panel-heading"><div><span className="eyebrow">01 / Basket</span><h2>Choose items</h2></div><span className="panel-mark">{menu.length} items</span></div>
-                          <p className="panel-intro">Build the basket for this customer.</p>
+                          <div className="panel-heading"><div><h2>Choose items</h2></div><span className="panel-mark">{menu.length} items</span></div>
+
                           {loading ? <div className="state">Loading menu…</div> : (
                             <div className="category-list">
                               {categories.map((category) => (
@@ -637,23 +715,11 @@ export default function App() {
                                     {menu.filter((item) => (item.category_name || item.category || "Menu") === category).map((item) => {
                                       const key = `add-${item.id}`;
                                       return (
-                                        <div
-                                          className="menu-row"
-                                          key={item.id}
-                                          role="button"
-                                          tabIndex={busy ? -1 : 0}
-                                          aria-label={`Add ${item.name} to order`}
-                                          aria-disabled={!!busy}
-                                          onClick={() => { if (!busy) void addItem(item); }}
-                                          onKeyDown={(event) => {
-                                            if ((event.key === "Enter" || event.key === " ") && event.target === event.currentTarget) {
-                                              event.preventDefault();
-                                              if (!busy) void addItem(item);
-                                            }
-                                          }}
-                                        >
-                                          <div><strong>{item.name}</strong><small>{item.description || "Menu item"}</small></div>
-                                          <div className="menu-card-meta"><span className="menu-price">{money(item.price)}</span><span className="menu-action-label">{busy === key ? "Adding…" : "Tap to add"}</span></div>
+                                        <div className="menu-row" key={item.id}>
+                                          <button type="button" className="menu-card-main" aria-label={`Add ${item.name} to order`} disabled={!!busy} onClick={() => void addItem(item)}>
+                                            <div><strong>{item.name}</strong><small>{item.description || "Menu item"}</small></div>
+                                            <div className="menu-card-meta"><span className="menu-price">{money(item.price)}</span><span className="menu-add-button" aria-hidden="true">{busy === key ? "Adding…" : "Add"}</span></div>
+                                          </button>
                                           <div className="menu-controls" onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
                                             <label className="sr-only" htmlFor={`quantity-${item.id}`}>Quantity for {item.name}</label>
                                             <input id={`quantity-${item.id}`} aria-label={`Quantity for ${item.name}`} type="number" min="1" value={quantities[item.id] || 1} onChange={(event) => setQuantities({ ...quantities, [item.id]: Math.max(1, Number(event.target.value) || 1) })} />
@@ -670,14 +736,14 @@ export default function App() {
                         </section>
 
                         <section className="panel basket-panel">
-                          <div className="panel-heading"><div><span className="eyebrow">Your basket</span><h2>Current order</h2></div><span className="panel-mark">{currentLines.length} lines</span></div>
+                          <div className="panel-heading"><div><h2>Current order</h2></div><span className="panel-mark">{currentLines.length} lines</span></div>
                           {hasItems ? (
                             <>
                               <OrderLines order={currentOrder || {}} />
                               <TaxBreakdown order={currentOrder || {}} />
                             </>
                           ) : (
-                            <div className="basket-start"><div className="basket-icon">+</div><strong>Add items to begin.</strong><p>The basket will appear here.</p></div>
+                            <div className="basket-start"><div className="basket-icon">+</div><strong>Add items to begin.</strong></div>
                           )}
                           <div className="button-row basket-actions">
                             <button className="action-button primary" disabled={!hasItems || !!busy} onClick={() => setStep("confirm")}>Review order</button>
@@ -689,8 +755,8 @@ export default function App() {
                     {step === "confirm" && (
                       <section className="flow-grid confirm-grid">
                         <section className="panel">
-                          <div className="panel-heading"><div><span className="eyebrow">02 / {orderMode === "delivery" ? "Delivery details" : "Customer"}</span><h2>{orderMode === "delivery" ? "Where should it go?" : "Name for pickup"}</h2></div></div>
-                          <p className="panel-intro">{orderMode === "delivery" ? "Save the delivery address and contact details before collecting cash." : "Use the name to call the customer when the order is ready."}</p>
+                          <div className="panel-heading"><div><h2>{orderMode === "delivery" ? "Where should it go?" : "Name for pickup"}</h2></div></div>
+
                           <label className="field-label" htmlFor="customer-name">{orderMode === "delivery" ? "Customer / contact name" : "Customer name"}</label>
                           <input id="customer-name" className="text-input" autoFocus value={customerName} onChange={(event) => setCustomerName(event.target.value)} placeholder="e.g. Mika" />
                           {orderMode === "delivery" && (
@@ -709,7 +775,6 @@ export default function App() {
                           </div>
                         </section>
                         <section className="panel summary-panel">
-                          <span className="eyebrow">Order summary</span>
                           <h2>Current order</h2>
                           <OrderLines order={currentOrder || {}} />
                           <TaxBreakdown order={currentOrder || {}} />
@@ -720,9 +785,8 @@ export default function App() {
                     {step === "payment" && (
                       <section className="handoff-card">
                         <div className="handoff-copy">
-                          <span className="eyebrow">03 / {orderMode === "qr" ? "QR payment" : orderMode === "delivery" ? "Delivery payment" : "Payment"}</span>
                           <h2>{orderMode === "qr" ? "Review and collect cash." : orderMode === "delivery" ? "Collect cash for delivery." : "Collect cash."}</h2>
-                          <p>{orderMode === "qr" ? "This order was submitted by the customer. The basket is read-only." : orderMode === "delivery" ? "The order is paid before dispatch. The delivery board opens after payment." : "The order number appears after payment."}</p>
+
                           {orderMode === "qr" && <div className="order-number">{currentOrder?.order_number}</div>}
                           <div className="handoff-meta">
                             <span>{currentOrder?.customer_name || "Customer"}</span>
@@ -743,7 +807,7 @@ export default function App() {
                     {step === "fulfillment" && (
                       <section className="fulfillment-card">
                         <div className="fulfillment-head">
-                          <div><span className="eyebrow">04 / Kitchen & pickup</span><h2>{ticket?.status === "served" ? "Ready for pickup." : "Order is moving."}</h2><p>Call <strong>{currentOrder?.customer_name || "the customer"}</strong> or display the order number.</p></div>
+                          <div><span className="eyebrow">04 / Kitchen & pickup</span><h2>{ticket?.status === "served" ? "Ready for pickup." : "Order is moving."}</h2></div>
                           <div className="order-number small">{currentOrder?.order_number}</div>
                         </div>
                         <div className="fulfillment-status">
@@ -805,7 +869,8 @@ export default function App() {
           />
         )}
       </main>
-    </div>
+      </div>
+      </div>
   );
 }
 
@@ -815,16 +880,12 @@ function EntryChoice({ onManual, onQr, busy }: { onManual: () => void; onQr: () 
       <div className="entry-grid">
         <button className="entry-card" onClick={onManual} disabled={busy}>
           <span className="entry-icon">+</span>
-          <span className="eyebrow">Manual</span>
           <h3>New order</h3>
-          <p>Build the basket, add a name, and collect cash.</p>
           <strong>{busy ? "Starting…" : "Start order"}</strong>
         </button>
         <button className="entry-card qr" onClick={onQr} disabled={busy}>
           <span className="entry-icon">QR</span>
-          <span className="eyebrow">Connected</span>
           <h3>QR orders</h3>
-          <p>Choose a submitted order and record cash.</p>
           <strong>Open orders</strong>
         </button>
       </div>
@@ -900,14 +961,14 @@ export function DeliveryBoard({ deliveries, drivers, busy, onAction, onStartDeli
 
   return (
     <>
-      <div className="delivery-board-toolbar"><div><span className="eyebrow">Local dispatch</span><p>Paid delivery orders only. No external courier connection.</p></div><button className="action-button primary" onClick={onStartDelivery} disabled={busy}>New delivery</button></div>
-      {deliveries.length ? <div className="delivery-board">
+      <div className="delivery-board-toolbar"><button className="action-button primary" onClick={onStartDelivery} disabled={busy}>New delivery</button></div>
+      {deliveries.length ? <div className="delivery-board" role="list">
         {deliveries.map((delivery) => {
           const status = String(delivery.status);
           const selected = selectedDriver(delivery);
           const terminal = ["delivered", "failed", "cancelled"].includes(status);
           return (
-            <article className="delivery-card" key={delivery.id}>
+            <article className="delivery-card" key={delivery.id} role="listitem">
               <div className="delivery-card-head">
                 <div><span className="eyebrow">{delivery.order_number}</span><h3>{delivery.contact_name || delivery.customer_name || "Unnamed customer"}</h3><p>{money(delivery.order_total)} · {delivery.contact}</p></div>
                 <StatusPill value={status} />
@@ -945,6 +1006,7 @@ export function DeliveryBoard({ deliveries, drivers, busy, onAction, onStartDeli
     </>
   );
 }
+
 
 function SecondaryView({
   view,
@@ -989,17 +1051,7 @@ function SecondaryView({
   const [purchaseSupplier, setPurchaseSupplier] = useState(1);
   const [lineDrafts, setLineDrafts] = useState<Record<string, Row>>({});
   const [receiptDrafts, setReceiptDrafts] = useState<Record<string, Row>>({});
-  const [eyebrow, heading] = titles[view];
-  const description = view === "payments"
-    ? "Select a submitted QR order and record cash."
-    : view === "kitchen"
-      ? "Paid orders appear here automatically."
-      : view === "ready"
-        ? "Call customers by name or order number."
-        : view === "delivery"
-          ? "Assign active drivers and track paid deliveries."
-          : "Warehouse stock and purchasing stay available when needed.";
-
+  const [, heading] = titles[view];
   const activeProducts = catalog.filter((item) => item.active !== 0);
   const lowStockRows = inventoryRows.filter((row) => row.low_stock);
   const defaultProduct = activeProducts[0]?.id || adjustmentProduct;
@@ -1041,7 +1093,7 @@ function SecondaryView({
   return (
     <section className="secondary-page">
       <div className="secondary-heading">
-        <div><span className="eyebrow">{eyebrow}</span><h2>{heading}</h2><p>{description}</p></div>
+        <div><h1>{heading}</h1></div>
         <button className="refresh" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button>
       </div>
 
@@ -1053,18 +1105,18 @@ function SecondaryView({
       )}
 
       {loading ? <div className="panel state">Loading…</div> : view === "payments" ? (
-        <div className="queue-list">
+        <div className="queue-list" role="list">
           {paymentRows.length ? paymentRows.map((order) => (
-            <article className="queue-card" key={order.id}>
+            <article className="queue-card" key={order.id} role="listitem">
               <div><span className="eyebrow">{order.order_number}</span><h3>{order.customer_name || "Unnamed customer"}</h3><p>{order.table_code || "QR order"} · {order.lines?.length || 0} items</p></div>
-              <div className="queue-side"><strong>{money(order.total)}</strong><StatusPill value="awaiting payment" /><button className="action-button" onClick={() => onSelect(order)}>Review & pay</button></div>
+              <div className="queue-side"><strong>{money(order.total)}</strong><StatusPill value="awaiting" /><button className="action-button" onClick={() => onSelect(order)}>Review & pay</button></div>
             </article>
           )) : <Empty>No QR orders are waiting for payment.</Empty>}
         </div>
       ) : view === "kitchen" || view === "ready" ? (
-        <div className="queue-list">
+        <div className="queue-list" role="list">
           {kitchenRows.length ? kitchenRows.map((ticket) => (
-            <article className="queue-card" key={ticket.id}>
+            <article className="queue-card" key={ticket.id} role="listitem">
               <div><span className="eyebrow">{ticket.order_number}</span><h3>{ticket.customer_name || "Customer"}</h3><p>{ticket.table_code === "COUNTER" ? "Counter" : ticket.table_code} · {ticket.ticket_number}</p></div>
               <div className="queue-side"><StatusPill value={ticket.status} /><button className="action-button" onClick={() => onSelect({ id: ticket.order_id, status: ticket.status, order_number: ticket.order_number, customer_name: ticket.customer_name, ticket })}>Open order</button></div>
             </article>
@@ -1083,7 +1135,7 @@ function SecondaryView({
             <section className="panel operations-panel">
               <span className="eyebrow">Inventory / adjustment</span>
               <h3>Move stock with a reason</h3>
-              <p className="panel-intro">Positive and negative adjustments are warehouse-scoped. The API blocks reserved or negative stock.</p>
+
               <div className="form-grid">
                 <label className="field-label">Product<select className="text-input" value={adjustmentProduct || defaultProduct} onChange={(event) => setAdjustmentProduct(Number(event.target.value))}>{activeProducts.map((product) => <option key={product.id} value={product.id}>{product.sku} · {product.name}</option>)}</select></label>
                 <label className="field-label">Quantity<input className="text-input" type="number" step="1" value={adjustmentQuantity} onChange={(event) => setAdjustmentQuantity(event.target.value)} /></label>
@@ -1101,7 +1153,7 @@ function SecondaryView({
           </div>
 
           <section className="panel operations-panel purchase-panel">
-            <div className="panel-heading"><div><span className="eyebrow">Purchasing / lifecycle</span><h3>Drafts, receipts, and closeout</h3><p className="panel-intro">Receive each line in parts. Over-receipt requires an authorized override and a reason.</p></div><div className="inline-control"><select className="text-input compact-select" value={purchaseSupplier || defaultSupplier} onChange={(event) => setPurchaseSupplier(Number(event.target.value))}>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select><button className="action-button" disabled={!!busy || !suppliers.length} onClick={() => onCreatePurchase(purchaseSupplier || defaultSupplier)}>{busy === "purchase-create" ? "Creating…" : "New draft"}</button></div></div>
+            <div className="panel-heading"><div><h3>Drafts, receipts, and closeout</h3></div><div className="inline-control"><select className="text-input compact-select" value={purchaseSupplier || defaultSupplier} onChange={(event) => setPurchaseSupplier(Number(event.target.value))}>{suppliers.map((supplier) => <option key={supplier.id} value={supplier.id}>{supplier.name}</option>)}</select><button className="action-button" disabled={!!busy || !suppliers.length} onClick={() => onCreatePurchase(purchaseSupplier || defaultSupplier)}>{busy === "purchase-create" ? "Creating…" : "New draft"}</button></div></div>
             {purchases.length ? <div className="purchase-list">{purchases.map((purchase) => {
               const draft = lineDraft(purchase);
               const receipt = receiptDraft(purchase);
@@ -1118,12 +1170,12 @@ function SecondaryView({
           </section>
 
           <div className="operations-grid">
-            <section className="panel"><span className="eyebrow">Floor reference</span><h3>Tables</h3>{tableRows.length ? <div className="simple-list">{tableRows.map((table) => <div className="simple-row" key={table.id}><div><strong>{table.code}</strong><small>{table.name} · {table.seats} seats</small></div><StatusPill value={table.status} /></div>)}</div> : <Empty>No tables found.</Empty>}</section>
-            <section className="panel"><span className="eyebrow">Sales history</span><h3>Receipts</h3>{receipts.length ? <div className="simple-list">{receipts.slice(0, 8).map((receipt) => <div className="simple-row" key={receipt.id}><div><strong>{receipt.receipt_number}</strong><small>{receipt.order_number} · {receipt.table_code}</small></div><strong>{money(receipt.total)}</strong></div>)}</div> : <Empty>No receipts yet.</Empty>}</section>
+            <section className="panel"><h3>Tables</h3>{tableRows.length ? <div className="simple-list">{tableRows.map((table) => <div className="simple-row" key={table.id}><div><strong>{table.code}</strong><small>{table.name} · {table.seats} seats</small></div><StatusPill value={table.status} /></div>)}</div> : <Empty>No tables found.</Empty>}</section>
+            <section className="panel"><h3>Receipts</h3>{receipts.length ? <div className="simple-list">{receipts.slice(0, 8).map((receipt) => <div className="simple-row" key={receipt.id}><div><strong>{receipt.receipt_number}</strong><small>{receipt.order_number} · {receipt.table_code}</small></div><strong>{money(receipt.total)}</strong></div>)}</div> : <Empty>No receipts yet.</Empty>}</section>
           </div>
 
           <TaxConfiguration configuration={taxConfiguration} saving={taxSaving} onSave={onSaveTaxRule} />
-          <section className="panel audit-panel"><span className="eyebrow">Audit trail</span><h3>Inventory and purchasing events</h3>{auditEvents.length ? <div className="simple-list">{auditEvents.slice(0, 12).map((event) => <div className="simple-row" key={event.id}><div><strong>{label(event.event_type)}</strong><small>{event.detail || "No detail"}</small></div><small>{event.created_at}</small></div>)}</div> : <Empty>No operational events yet.</Empty>}</section>
+          <section className="panel audit-panel"><h3>Inventory and purchasing events</h3>{auditEvents.length ? <div className="simple-list">{auditEvents.slice(0, 12).map((event) => <div className="simple-row" key={event.id}><div><strong>{label(event.event_type)}</strong><small>{event.detail || "No detail"}</small></div><small>{event.created_at}</small></div>)}</div> : <Empty>No operational events yet.</Empty>}</section>
         </div>
       )}
     </section>
@@ -1150,7 +1202,7 @@ function TaxConfiguration({ configuration, saving, onSave }: { configuration: Ro
   return (
     <section className="panel tax-config-panel" aria-label="Tax configuration">
       <div className="panel-heading"><div><span className="eyebrow">Configuration</span><h3>Tax rules</h3></div><span className="panel-mark">Manager / admin</span></div>
-      <p className="panel-intro">Rules are selected by effective date and copied into orders at confirmation. Existing receipts do not change.</p>
+
       <div className="tax-active-rule"><span className="eyebrow">Effective today</span><strong>{active ? `${active.name} · ${active.rate}% ${active.policy}` : "No active tax rule"}</strong></div>
       <form className="tax-rule-form" onSubmit={submit}>
         <label>Rule name<input id="tax-name" className="text-input" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} required /></label>
