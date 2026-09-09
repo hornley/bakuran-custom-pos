@@ -95,7 +95,7 @@ function recalculateMockOrder(order: MockRow) {
   ));
   const discountAmount = order.promotion ? promotionDiscount(order.promotion, originalSubtotal) : 0;
   const discountedSubtotal = money(Math.max(originalSubtotal - discountAmount, 0));
-  const shouldCalculateTax = order.status === "awaiting_payment" || !!order.promotion;
+  const shouldCalculateTax = order.status === "awaiting_payment";
   const tax = shouldCalculateTax ? calculateMockTax(discountedSubtotal) : {
     policy: "none",
     rate: "0.00",

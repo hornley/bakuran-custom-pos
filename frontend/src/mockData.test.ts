@@ -208,8 +208,8 @@ describe("mock visual data", () => {
     expect(applied.promotion.code).toBe(promotions[0].code);
     expect(Number(applied.promotion.discount_amount)).toBeGreaterThan(0);
     expect(Number(applied.order.discounted_subtotal)).toBeLessThan(Number(applied.order.original_subtotal));
-    expect(Number(applied.tax.tax_amount)).toBeGreaterThan(0);
-    expect(Number(applied.order.total)).toBe(Number(applied.tax.total));
+    expect(Number(applied.tax.tax_amount)).toBe(0);
+    expect(Number(applied.order.total)).toBe(Number(applied.order.discounted_subtotal));
 
     const removed = await mockApi<any>(`/api/orders/${started.order.id}/promotions/${applied.promotion.id}`, {
       method: "DELETE",
