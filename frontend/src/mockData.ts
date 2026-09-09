@@ -49,6 +49,15 @@ const state: MockState = {
 const money = (value: number) => Number(value.toFixed(2));
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+function promotionStatus(promotion: MockRow) {
+  if (promotion.active === false) return "inactive";
+  const today = new Date().toISOString().slice(0, 10);
+  if (promotion.starts_on && today < promotion.starts_on) return "scheduled";
+  if (promotion.ends_on && today > promotion.ends_on) return "expired";
+  if (promotion.usage_limit != null && Number(promotion.usage_count || 0) >= Number(promotion.usage_limit)) return "exhausted";
+  return "active";
+}
+
 function calculateMockTax(subtotal: number) {
   const rule = state.taxConfiguration.effective_rule;
   if (!rule) {
@@ -347,9 +356,14 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
       return clone(orderView(order)) as T;
     }
     if (!["open", "awaiting_payment"].includes(String(order.status || "open"))) throw new Error("Promotion cannot be changed after payment or release");
-    const promotion = state.promotions.find((candidate) => candidate.code === code && candidate.active !== false);
+    const promotion = state.promotions.find((candidate) => candidate.code === code);
     if (!promotion) throw new Error("Promotion code is not available");
+    if (promotionStatus(promotion) !== "active") throw new Error("Promotion code is not available");
     if (order.promotion && order.promotion.code === code) return clone(orderView(order)) as T;
+    if (order.promotion) {
+      const previous = state.promotions.find((candidate) => candidate.code === order.promotion.code);
+      if (previous) previous.usage_count = Math.max(Number(previous.usage_count || 0) - 1, 0);
+    }
     const applied = {
       ...clone(promotion),
       id: state.nextAppliedPromotionId++,
@@ -360,6 +374,7 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
       discounted_subtotal: money(Math.max(Number(order.subtotal || 0) - promotionDiscount(promotion, Number(order.subtotal || 0)), 0)),
     };
     order.promotion = applied;
+    promotion.usage_count = Number(promotion.usage_count || 0) + 1;
     recalculateMockOrder(order);
     order.promotion = { ...applied, discount_amount: order.discount_amount, discounted_subtotal: order.discounted_subtotal };
     return clone(orderView(order)) as T;
@@ -373,8 +388,11 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     if (!order.promotion && order.promotion_remove_key === idempotencyKey) return clone(orderView(order)) as T;
     if (!["open", "awaiting_payment"].includes(String(order.status || "open"))) throw new Error("Promotion cannot be changed after payment or release");
     if (!order.promotion || ![Number(promotionRemoveMatch[2]), Number(order.promotion.applied_id)].includes(Number(order.promotion.id))) throw new Error("Applied promotion not found");
+    const previousCode = order.promotion.code;
     order.promotion = null;
     order.promotion_remove_key = idempotencyKey;
+    const previous = state.promotions.find((candidate) => candidate.code === previousCode);
+    if (previous) previous.usage_count = Math.max(Number(previous.usage_count || 0) - 1, 0);
     recalculateMockOrder(order);
     return clone(orderView(order)) as T;
   }

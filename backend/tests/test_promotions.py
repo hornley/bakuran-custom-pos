@@ -117,6 +117,19 @@ def test_promotions_normalize_codes_list_status_and_bound_values(client):
         assert response.status_code == 422, response.text
 
 
+def test_editing_an_open_promoted_order_reprices_the_snapshot(client):
+    create_promotion(client, value="5.00")
+    order_id = start_order(client)
+    applied = apply_promotion(client, order_id, "save10", key="open-edit-1")
+    assert applied.status_code == 200
+    updated = client.post(f"/api/orders/{order_id}/lines", json={"menu_item_id": 2, "quantity": 1})
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["order"]["original_subtotal"] == "34.00"
+    assert body["order"]["discount_amount"] == "5.00"
+    assert body["order"]["discounted_subtotal"] == "29.00"
+
+
 def test_fixed_promotion_recalculates_from_discounted_subtotal_and_preserves_tax_snapshot(client):
     tax = configure_tax(client)
     order_id = start_order(client)

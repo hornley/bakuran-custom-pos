@@ -684,9 +684,13 @@ def health():
         raise HTTPException(status_code=503, detail=f"Database is not ready: {exc}") from exc
     return {"status":"ok", "database_ready":True, "project_name":PROJECT_NAME, "target_stack":TARGET_STACK, "frontend_template":FRONTEND_TEMPLATE, "export_status":EXPORT_STATUS}
 @app.get("/api/promotions")
-def promotions():
+def promotions(request: Request):
     with connect() as c:
-        return [promotion_view(row) for row in c.execute("SELECT * FROM promotions ORDER BY id DESC")]
+        can_apply = not auth_module.auth_enabled() or bool(_promotion_roles(request) & {"admin", "manager", "operator"})
+        result = [promotion_view(row) for row in c.execute("SELECT * FROM promotions ORDER BY id DESC")]
+        for promotion in result:
+            promotion["can_apply"] = can_apply
+        return result
 
 
 @app.post("/api/promotions", status_code=201)
@@ -1343,7 +1347,7 @@ def add_line(oid:int,x:LineIn):
         if old: c.execute("UPDATE restaurant_order_lines SET quantity=?,line_total=? WHERE order_id=? AND menu_item_id=?",(new_qty,str(line_total),oid,x.menu_item_id))
         else:
             c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)",(oid,x.menu_item_id,item["name"],x.quantity,item["price"],str(line_total)))
-        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
+        reprice_order(c, oid); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 @app.delete("/api/orders/{oid}/lines/{lid}")
@@ -1353,7 +1357,7 @@ def remove_line(oid:int,lid:int):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]!="open": fail("Only open orders can be edited",409)
         if not c.execute("DELETE FROM restaurant_order_lines WHERE id=? AND order_id=?",(lid,oid)).rowcount: fail("Order line not found",404)
-        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
+        reprice_order(c, oid); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 
