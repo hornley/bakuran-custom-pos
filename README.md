@@ -88,6 +88,7 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 - Delivery: create cash-only delivery orders, validate address/contact metadata, assign active drivers, and track dispatch through delivered, failed, or cancelled outcomes from the secondary delivery board.
 - Attendance: review employee attendance status.
 - Tax: configure effective inclusive/exclusive rules from the secondary Operations view and review tax breakdowns on orders.
+- Promotions: managers/admins define bounded fixed or percentage codes; operators can apply, replace, or remove one promotion before payment on counter and delivery orders. Discounts are audited, idempotent, and reflected in the server-authoritative tax-inclusive total.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
 - Operations: review warehouse-scoped inventory, low-stock/reorder levels, purchase lifecycle progress, receipts, and audit events.
 

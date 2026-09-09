@@ -285,7 +285,24 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 || `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
 || `GET /api/audit-events` | Review audit events for inventory, purchasing, delivery, and auth actions |
 || `GET /api/tax/configuration` | List tax rules and the rule effective today |
-|| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+- `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+
+### Promotions and discounts
+
+Operator-created counter and delivery orders may use one replaceable promotion before payment.
+Codes are trimmed, case-insensitive, and stored normalized; v1 supports bounded fixed-amount and
+percentage discounts with inclusive validity dates and no stacking. Managers/admins create rules,
+operators may apply eligible rules, and viewers remain read-only. Apply/remove mutations require
+idempotency keys, are audited transactionally, enforce usage limits, and reject paid, released,
+closed, cancelled, or public QR orders. Promotion snapshots preserve code, rule, and exact
+discount values on orders and receipts. Tax is recalculated from the discounted taxable subtotal
+using the existing tax-rule snapshot. Refunds, voids, usage reversal, gateways, and customer QR
+discounts remain out of scope.
+
+| `GET /api/promotions` | List promotion definitions and operator capability/status |
+| `POST /api/promotions` | Create a manager/admin promotion definition |
+| `POST /api/orders/{order_id}/promotions` | Apply or replace a promotion before payment; requires `Idempotency-Key` |
+| `DELETE /api/orders/{order_id}/promotions/{applied_id}` | Remove a promotion before payment; requires `Idempotency-Key` |
 
 The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it records a draft as ordered, receives all outstanding lines, and returns the historical purchase-row response. The legacy `POST /api/stock/receipt` endpoint remains available and supports an optional idempotency key for safe retries.
 

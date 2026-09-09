@@ -1,6 +1,6 @@
 # Phase 8 — Promotions and discounts
 
-**Status:** Implementation in progress; explicit developer approval required before merge.
+**Status:** Implementation complete; independent review approved at exact head `89ee42fb2f6c73fa6a4fb30781847b50ff4aa03f`. Developer approval is required before merge.
 **Branch:** `feat/promotions-discounts`
 **Base:** `0daaa8ffc7b9ee10cf4301b42a07b1b3df90b8f6`
 
