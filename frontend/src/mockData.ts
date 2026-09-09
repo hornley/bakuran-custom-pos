@@ -9,6 +9,7 @@ export function isMockMode(): boolean {
 
 type MockState = {
   nextOrderId: number;
+  nextCustomerOrderId: number;
   orders: MockRow[];
   kitchen: MockRow[];
   payments: MockRow[];
@@ -30,6 +31,7 @@ const menu = [
 
 const state: MockState = {
   nextOrderId: 105,
+  nextCustomerOrderId: 501,
   orders: [],
   kitchen: [],
   payments: [],
@@ -117,6 +119,7 @@ function seedOrders() {
 
 export function resetMockData() {
   state.nextOrderId = 105;
+  state.nextCustomerOrderId = 501;
   seedOrders();
 }
 
@@ -178,9 +181,6 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     const payload = parseJson(options);
     const nextRule = { id: (state.taxConfiguration.rules?.length || 0) + 1, ...payload, rate: String(payload.rate), policy: payload.policy || "exclusive" };
     state.taxConfiguration = { rules: [nextRule, ...(state.taxConfiguration.rules || [])], effective_rule: nextRule };
-    for (const order of state.orders.filter((candidate) => candidate.status === "awaiting_payment")) {
-      Object.assign(order, calculateMockTax(Number(order.subtotal || 0)));
-    }
     return clone(nextRule) as T;
   }
   if (pathname === "/api/purchases" && options?.method === "POST") {
@@ -258,7 +258,10 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     const lines = (payload.lines || []).map((line: MockRow, index: number) => { const item = menu.find((entry) => entry.id === line.menu_item_id) || menu[0]; return { id: index + 1, menu_item_id: item.id, item_name: item.name, quantity: line.quantity, unit_price: item.price, line_total: item.price * line.quantity }; });
     const subtotal = lines.reduce((sum: number, line: MockRow) => sum + line.line_total, 0);
     const tax = calculateMockTax(subtotal);
-    return clone({ order: { id: 501, order_number: "QR-0501", status: "awaiting_payment", customer_name: payload.customer_name, order_channel: "qr", subtotal, ...tax }, lines, table: { table_code: "T06", table_name: "Table 6" } }) as T;
+    const order = { id: state.nextCustomerOrderId++, order_number: `QR-${String(state.nextCustomerOrderId - 1).padStart(4, "0")}`, status: "awaiting_payment", customer_name: payload.customer_name, table_code: "T06", order_channel: "qr", subtotal, ...tax, lines };
+    state.orders.unshift(order);
+    state.payments.unshift(order);
+    return clone({ order, lines, table: { table_code: "T06", table_name: "Table 6" } }) as T;
   }
   if (pathname === "/api/counter/orders" && options?.method === "POST") return clone(orderView(newCounterOrder(parseJson(options).order_channel || "counter"))) as T;
   const kitchenMatch = pathname.match(/^\/api\/kitchen\/(\d+)\/(start|ready|serve)$/);
@@ -277,7 +280,19 @@ export async function mockApi<T = any>(path: string, options?: RequestInit): Pro
     const action = orderMatch[2];
     if (!action) return clone(orderView(order)) as T;
     if (action === "lines") {
-      const payload = parseJson(options); const item = menu.find((entry) => entry.id === payload.menu_item_id) || menu[0]; const existing = order.lines.find((line: MockRow) => line.menu_item_id === item.id); if (existing) existing.quantity += payload.quantity || 1; else order.lines.push({ id: Date.now(), menu_item_id: item.id, item_name: item.name, quantity: payload.quantity || 1, unit_price: item.price, line_total: item.price * (payload.quantity || 1) }); order.subtotal = order.lines.reduce((sum: number, line: MockRow) => sum + line.line_total, 0); order.total = order.subtotal; return clone(orderView(order)) as T;
+      const payload = parseJson(options);
+      const item = menu.find((entry) => entry.id === payload.menu_item_id) || menu[0];
+      const quantity = Number(payload.quantity || 1);
+      const existing = order.lines.find((line: MockRow) => line.menu_item_id === item.id);
+      if (existing) {
+        existing.quantity += quantity;
+        existing.line_total = item.price * existing.quantity;
+      } else {
+        order.lines.push({ id: Date.now(), menu_item_id: item.id, item_name: item.name, quantity, unit_price: item.price, line_total: item.price * quantity });
+      }
+      order.subtotal = order.lines.reduce((sum: number, line: MockRow) => sum + line.line_total, 0);
+      order.total = order.subtotal;
+      return clone(orderView(order)) as T;
     }
     if (action === "confirm") {
       order.customer_name = parseJson(options).customer_name;

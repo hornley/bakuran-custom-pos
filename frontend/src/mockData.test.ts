@@ -43,6 +43,26 @@ describe("mock visual data", () => {
     expect(paid.ticket.status).toBe("queued");
   });
 
+  it("recalculates a repeated menu line and order subtotal", async () => {
+    const started = await mockApi<any>("/api/counter/orders", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    await mockApi<any>(`/api/orders/${started.order.id}/lines`, {
+      method: "POST",
+      body: JSON.stringify({ menu_item_id: 1, quantity: 1 }),
+    });
+    const repeated = await mockApi<any>(`/api/orders/${started.order.id}/lines`, {
+      method: "POST",
+      body: JSON.stringify({ menu_item_id: 1, quantity: 1 }),
+    });
+
+    expect(repeated.order.lines[0].quantity).toBe(2);
+    expect(repeated.order.lines[0].line_total).toBe(370);
+    expect(repeated.order.subtotal).toBe(370);
+    expect(repeated.order.total).toBe(370);
+  });
+
   it("provides a safe customer QR session and submitted order preview", async () => {
     const session = await mockApi<any>("/api/customer/tables/demo-token");
     const submitted = await mockApi<any>("/api/customer/tables/demo-token/orders", {
@@ -130,6 +150,34 @@ describe("mock visual data", () => {
     expect(submitted.order.tax_policy).toBe("exclusive");
     expect(Number(submitted.order.tax_amount)).toBeGreaterThan(0);
     expect(Number(submitted.order.total)).toBe(Number(submitted.order.subtotal) + Number(submitted.order.tax_amount));
+  });
+
+  it("makes submitted customer QR orders available to the operator payment queue", async () => {
+    const submitted = await mockApi<any>("/api/customer/tables/demo-token/orders", {
+      method: "POST",
+      body: JSON.stringify({ customer_name: "Mika", lines: [{ menu_item_id: 1, quantity: 1 }] }),
+    });
+    const payments = await mockApi<any[]>("/api/payment-queue");
+    expect(payments.some((order) => order.id === submitted.order.id)).toBe(true);
+
+    const paid = await mockApi<any>(`/api/orders/${submitted.order.id}/pay`, {
+      method: "POST",
+      body: JSON.stringify({ amount: String(submitted.order.total), method: "cash" }),
+    });
+    expect(paid.order.status).toBe("paid");
+  });
+
+  it("preserves an awaiting-payment tax snapshot when tax configuration changes", async () => {
+    const before = await mockApi<any>("/api/orders/103");
+    await mockApi("/api/tax/configuration", {
+      method: "POST",
+      body: JSON.stringify({ name: "Reduced VAT", rate: "8.00", policy: "exclusive", effective_from: "2027-01-01" }),
+    });
+    const after = await mockApi<any>("/api/orders/103");
+
+    expect(after.order.tax_rate).toBe(before.order.tax_rate);
+    expect(after.order.tax_amount).toBe(before.order.tax_amount);
+    expect(after.order.total).toBe(before.order.total);
   });
 
   it("keeps mock inventory mutations visible after reload", async () => {
