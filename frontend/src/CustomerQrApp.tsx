@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { isMockMode, mockApi } from "./mockData";
 
 type MenuItem = {
   id: number;
@@ -50,6 +51,7 @@ function apiFailure(message: string, status?: number): ApiFailure {
 }
 
 async function customerApi<T>(token: string, suffix: string, options?: RequestInit): Promise<T> {
+  if (isMockMode()) return mockApi<T>(`/api/customer/tables/demo-token${suffix}`, options);
   const response = await fetch(
     `${API_BASE}/api/customer/tables/${encodeURIComponent(token)}${suffix}`,
     {

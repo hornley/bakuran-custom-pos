@@ -12,6 +12,9 @@ This is the generated Bakuran POS project. The commands below are project-local 
 
 - [`SPEC.md`](SPEC.md): current POS scope, workflows, API contracts, and acceptance criteria.
 - [`AGENTS.md`](AGENTS.md): database safety, phase lifecycle, branching, commits, and approval rules.
+
+- [`DESIGN.md`](DESIGN.md): the premium warm POS design system, interaction contract, and accessibility rules.
+
 - [`TESTING.md`](TESTING.md): short verification instructions for the current changes.
 - [`docs/phases/phase-1.md`](docs/phases/phase-1.md): current phase handoff and approval checklist.
 - [`docs/phases/phase-5.md`](docs/phases/phase-5.md): delivery workflow handoff and approval checklist.
@@ -35,6 +38,17 @@ Open the application at:
 http://100.108.61.26:5200
 ```
 
+### Preview with mock data
+
+To inspect the populated operator and customer surfaces without changing the SQLite database, open:
+
+```text
+http://100.108.61.26:5200/?mock=1
+http://100.108.61.26:5200/qr/demo-token?mock=1
+```
+
+Mock mode is read-only from the backend's perspective and is enabled only by the `mock=1` query parameter or `VITE_MOCK_DATA=true`. It shows realistic menu items, kitchen tickets, QR payment orders, delivery assignments, inventory, purchasing, receipts, and a customer QR flow.
+
 The API health check is:
 
 ```text
@@ -42,6 +56,8 @@ http://100.108.61.26:5300/api/health
 ```
 
 `start.sh` creates `backend/.venv` and installs `backend/requirements.txt` on the first run. It installs frontend dependencies if `frontend/node_modules` is missing. It starts both services with `0.0.0.0` binding and refuses to silently use a different port.
+
+The operator UI supports iPad portrait and landscape use. Open the frontend URL in Safari, or add it to the Home Screen for an app-like surface. The layout switches from the desktop rail to touch-friendly navigation at tablet widths and accounts for iPad safe-area insets.
 
 Stop or restart only this project with:
 

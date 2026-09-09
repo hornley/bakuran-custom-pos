@@ -1,7 +1,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { resolveApiBase } from "./App";
+
 
 type Row = Record<string, any>;
 
@@ -40,6 +41,48 @@ beforeEach(() => {
 });
 
 describe("counter operational flows", () => {
+  it("derives the API host from the served operator hostname", () => {
+    expect(resolveApiBase({ protocol: "http:", hostname: "100.108.61.26" })).toBe("http://100.108.61.26:5300");
+  });
+
+  it("starts a fresh counter order when New order is selected again", async () => {
+    let createdOrders = 0;
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/counter/orders")) {
+        createdOrders += 1;
+        return response({ order: { ...order, id: createdOrders, order_number: `BK-00${createdOrders}`, status: createdOrders === 1 ? "paid" : "open" }, lines: [] });
+      }
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => button(container, "Start order").click());
+    await settle();
+    expect(createdOrders).toBe(1);
+
+    await act(async () => button(container, "New order").click());
+    await settle();
+    expect(createdOrders).toBe(2);
+    await act(async () => root.unmount());
+  });
+
+  it("renders the premium operator shell with explicit service states", async () => {
+    const fetchMock = vi.fn((url: string) => response(url.endsWith("/api/menu") ? menu : []));
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    expect(container.querySelector(".operator-shell")).toBeTruthy();
+    expect(container.querySelector(".operator-rail")).toBeTruthy();
+    expect(container.querySelector(".service-strip")).toBeTruthy();
+    expect(container.textContent).toContain("Overview");
+
+    expect(container.textContent).toContain("Front desk");
+    expect(container.textContent).toContain("Cash gate");
+    expect(button(container, "New order")).toBeTruthy();
+    expect(container.querySelector('[aria-label="Bakuran operations"]')).toBeTruthy();
+    await act(async () => root.unmount());
+  });
+
   it("requests the ready kitchen queue when Ready is opened", async () => {
     const fetchMock = vi.fn((url: string) => response(url.endsWith("/api/menu") ? menu : []));
     const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
@@ -48,6 +91,34 @@ describe("counter operational flows", () => {
     await settle();
 
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:5300/api/kitchen?queue=ready", expect.objectContaining({ credentials: "include" }));
+    await act(async () => root.unmount());
+  });
+
+  it("keeps the operator shell ready for touch interaction", async () => {
+    const fetchMock = vi.fn((url: string) => response(url.endsWith("/api/menu") ? menu : []));
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    expect(container.querySelector(".rail-link")).toBeTruthy();
+    expect(container.querySelector(".service-strip")).toBeTruthy();
+    expect(container.querySelector(".action-button")).toBeTruthy();
+    await act(async () => root.unmount());
+  });
+
+  it("opens a kitchen attention row using its order id", async () => {
+    const fetchMock = vi.fn((url: string) => {
+      if (url.endsWith("/api/menu")) return response(menu);
+      if (url.endsWith("/api/kitchen")) return response([{ id: 44, order_id: 7, order_number: "BK-007", customer_name: "Mika", table_code: "COUNTER", ticket_number: "KIT-0044", status: "preparing" }]);
+      if (url.endsWith("/api/kitchen?queue=ready")) return response([]);
+      if (url.endsWith("/api/payment-queue")) return response([]);
+      if (url.endsWith("/api/orders/7")) return response({ order: { ...order, id: 7, status: "paid", order_channel: "counter" }, lines: [], ticket: { id: 44, order_id: 7, status: "preparing" } });
+      return response([]);
+    });
+    const { container, root } = await renderApp(fetchMock as unknown as typeof fetch);
+
+    await act(async () => { button(container, "Open").click(); });
+    await settle();
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:5300/api/orders/7", expect.objectContaining({ credentials: "include" }));
+    expect(fetchMock).not.toHaveBeenCalledWith("http://localhost:5300/api/orders/44", expect.anything());
     await act(async () => root.unmount());
   });
 
@@ -184,8 +255,8 @@ describe("counter operational flows", () => {
     await act(async () => button(container, "Continue to payment").click());
     await settle();
     expect(container.textContent).toContain("VAT (10.00%)");
-    expect(container.textContent).toContain("$1.20");
-    expect(container.textContent).toContain("$13.20");
+    expect(container.textContent).toContain("₱1.20");
+    expect(container.textContent).toContain("₱13.20");
     await act(async () => root.unmount());
   });
 
