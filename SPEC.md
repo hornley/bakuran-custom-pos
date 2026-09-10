@@ -393,7 +393,7 @@ The current POS does not include:
 - External courier, driver, GPS, route-optimization, webhook, or online-delivery integration.
 - Delivery refunds, cash-on-delivery collection, or settlement workflows.
 - Multi-store or multi-location synchronization; the QR route, delivery board, and payment queue use the single local SQLite store.
-| Recipe-level stock depletion, automatic sale reservations, or purchase invoicing.
+- Recipe-level stock depletion, automatic sale reservations, or purchase invoicing.
 
 ## 9. Acceptance criteria
 
