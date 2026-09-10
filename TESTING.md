@@ -114,3 +114,23 @@ cd backend
 The focused tax command verifies Decimal rounding, configuration authorization, manual and QR snapshots, defensive legacy QR payment snapshotting, and no-mutation rejection for oversized payment and order-line values. Monetary values are bounded to `9999999999.99`; each order-line quantity is bounded to `999999999` before Decimal totals are calculated.
 
 The default fixture uses the checked-in unauthenticated local deployment contract. The auth test explicitly opts into `AUTH_PROFILE=local`/`AUTH_ENABLED=true` with temporary bootstrap credentials and verifies manager/admin configuration access and operator denial. No credentials or operational database are used by the test.
+
+## Promotions and discounts
+
+Run the focused promotion suite and complete gates:
+
+```bash
+backend/.venv/bin/python -m pytest -q backend/tests/test_promotions.py
+./test.sh
+cd frontend && npm test && npm run build
+git diff --check
+```
+
+Promotion tests use isolated temporary SQLite databases and cover normalization, fixed/percentage
+rounding and bounds, manager/operator/viewer authorization, validity and usage limits, replacement
+and removal, concurrent transactional application, idempotency conflicts, lifecycle/payment gates,
+discounted-subtotal tax snapshots, receipts, delivery compatibility, and public QR isolation.
+Frontend tests cover apply/retry/remove controls, server-returned pricing, permission and error
+states, mock lifecycle parity, usage tracking, and unknown mutation failures. These are mocked or
+TestClient checks; they do not replace served-host browser validation at 1440, 1280, 1024, 768,
+and 390 pixel widths. Never use `backend/data/app.db` for promotion checks.

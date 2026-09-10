@@ -88,6 +88,7 @@ The backend allows the Tailscale frontend origin for CORS. These settings apply 
 - Delivery: create cash-only delivery orders, validate address/contact metadata, assign active drivers, and track dispatch through delivered, failed, or cancelled outcomes from the secondary delivery board.
 - Attendance: review employee attendance status.
 - Tax: configure effective inclusive/exclusive rules from the secondary Operations view and review tax breakdowns on orders.
+- Promotions: managers/admins define bounded fixed or percentage codes; operators can apply, replace, or remove one promotion before payment on counter and delivery orders. Discounts are audited, idempotent, and reflected in the server-authoritative tax-inclusive total.
 - Settings, search, and notifications: load settings, search resources, and review attention notifications.
 - Operations: review warehouse-scoped inventory, low-stock/reorder levels, purchase lifecycle progress, receipts, and audit events.
 
@@ -146,9 +147,20 @@ POST /api/orders/{order_id}/delivery
 POST /api/delivery/{delivery_id}/assign
 POST /api/delivery/{delivery_id}/callback
 GET /api/audit-events
+GET /api/promotions
+POST /api/promotions
+POST /api/orders/{order_id}/promotions
+DELETE /api/orders/{order_id}/promotions/{applied_id}
 ```
 
 Important POS mutations include counter order creation, order lines, order confirmation, cash payment, kitchen transitions, order close, and sales receipt issuance. The Operations route uses explicit warehouse filters, reasoned signed adjustments, per-line purchase receipts, and durable idempotency keys for supported mutations. The frontend uses `/api/receipts` for sales receipts. The legacy no-body purchase receive endpoint remains available for older clients and records an implicit ordered transition before completion; legacy stock receipts accept an optional idempotency key.
+
+## Promotions and discounts
+
+Promotion codes support bounded fixed-amount and percentage discounts on counter and delivery
+orders before payment. One promotion may be replaced or removed before payment. Manager/admin
+definition, operator application, audit, idempotency, usage limits, and tax recalculation are
+server-authoritative; public QR orders and viewers remain read-only.
 
 ## Tax configuration
 
@@ -178,4 +190,4 @@ If another application owns either port, stop that application before running `.
 
 ## Boundaries
 
-This is a local single-store SQLite operational slice. It does not include multi-location synchronization or transfers, reservations, external payment gateways, online card payment, refunds, promotions, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers. Tax is limited to configured single-store rules and immutable snapshots; inventory and purchasing are available as deferred back-office capabilities; neither area is fiscal-device, accounting, or inventory-compliance software.
+This is a local single-store SQLite operational slice. It does not include multi-location synchronization or transfers, reservations, external payment gateways, online card payment, refunds, recipe-level stock depletion, printer or fiscal-device integrations, payroll, biometric attendance, loyalty, email, external courier/driver integration, GPS tracking, route optimization, webhooks, background workers, hosted deployment, or third-party identity providers. Tax is limited to configured single-store rules and immutable snapshots; inventory and purchasing are available as deferred back-office capabilities; neither area is fiscal-device, accounting, or inventory-compliance software.

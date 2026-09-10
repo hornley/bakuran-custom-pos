@@ -256,36 +256,53 @@ The backend uses FastAPI and SQLite. The current POS relies on these public inte
 | `GET /api/kitchen` | List kitchen tickets |
 | `GET /api/receipts` | List sales receipts with immutable tax snapshots |
 | `GET /api/tables` | Secondary operations reference |
-|| `GET /api/warehouses` | List active warehouse scopes |
-|| `POST /api/warehouses` | Create an active warehouse scope |
-|| `GET /api/inventory` | List warehouse-scoped stock and movements |
-|| `GET /api/inventory/low-stock` | List stock at or below reorder level |
-|| `GET /api/inventory/reorder` | Compatibility alias for low-stock visibility |
-|| `PUT /api/inventory/reorder-level` | Set a product/warehouse reorder level |
-|| `POST /api/stock/adjustment` | Apply a reasoned signed stock adjustment |
-|| `GET /api/purchases` | List purchases with receipt progress per line |
-|| `POST /api/purchases` | Create a draft purchase |
-|| `POST /api/purchases/{purchase_id}/lines` | Add a validated product/warehouse line to a draft |
-|| `POST /api/purchases/{purchase_id}/order` | Move a draft purchase to ordered |
-|| `POST /api/purchases/{purchase_id}/receive` | Receive selected quantities, including partial receipts |
-|| `POST /api/purchases/{purchase_id}/close` | Close a fully received purchase |
-|| `GET /api/customer/tables/{token}` | Public session-scoped table context and active menu |
-|| `GET /api/customer/tables/{token}/menu` | Public active menu for a table session |
-|| `POST /api/customer/tables/{token}/orders` | Public QR order submission; requires `Idempotency-Key` |
-|| `GET /api/customer/tables/{token}/orders/{order_id}` | Public QR order status scoped to the same token/session |
-|| `POST /api/orders/{order_id}/delivery` | Validate and save delivery address/contact metadata |
-|| `GET /api/delivery` | List delivery board records, optionally filtered by status |
-|| `GET /api/delivery/drivers` | List active delivery drivers |
-|| `GET /api/delivery/{delivery_id}` | Load one delivery with driver and assignment history |
-|| `POST /api/delivery/{delivery_id}/assign` | Assign or reassign an active driver |
-|| `POST /api/delivery/{delivery_id}/out-for-delivery` | Guarded dispatch transition |
-|| `POST /api/delivery/{delivery_id}/delivered` | Guarded delivery completion transition |
-|| `POST /api/delivery/{delivery_id}/failed` | Record a failed delivery with a reason |
-|| `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
-|| `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
-|| `GET /api/audit-events` | Review audit events for inventory, purchasing, delivery, and auth actions |
-|| `GET /api/tax/configuration` | List tax rules and the rule effective today |
-|| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+| `GET /api/warehouses` | List active warehouse scopes |
+| `POST /api/warehouses` | Create an active warehouse scope |
+| `GET /api/inventory` | List warehouse-scoped stock and movements |
+| `GET /api/inventory/low-stock` | List stock at or below reorder level |
+| `GET /api/inventory/reorder` | Compatibility alias for low-stock visibility |
+| `PUT /api/inventory/reorder-level` | Set a product/warehouse reorder level |
+| `POST /api/stock/adjustment` | Apply a reasoned signed stock adjustment |
+| `GET /api/purchases` | List purchases with receipt progress per line |
+| `POST /api/purchases` | Create a draft purchase |
+| `POST /api/purchases/{purchase_id}/lines` | Add a validated product/warehouse line to a draft |
+| `POST /api/purchases/{purchase_id}/order` | Move a draft purchase to ordered |
+| `POST /api/purchases/{purchase_id}/receive` | Receive selected quantities, including partial receipts |
+| `POST /api/purchases/{purchase_id}/close` | Close a fully received purchase |
+| `GET /api/customer/tables/{token}` | Public session-scoped table context and active menu |
+| `GET /api/customer/tables/{token}/menu` | Public active menu for a table session |
+| `POST /api/customer/tables/{token}/orders` | Public QR order submission; requires `Idempotency-Key` |
+| `GET /api/customer/tables/{token}/orders/{order_id}` | Public QR order status scoped to the same token/session |
+| `POST /api/orders/{order_id}/delivery` | Validate and save delivery address/contact metadata |
+| `GET /api/delivery` | List delivery board records, optionally filtered by status |
+| `GET /api/delivery/drivers` | List active delivery drivers |
+| `GET /api/delivery/{delivery_id}` | Load one delivery with driver and assignment history |
+| `POST /api/delivery/{delivery_id}/assign` | Assign or reassign an active driver |
+| `POST /api/delivery/{delivery_id}/out-for-delivery` | Guarded dispatch transition |
+| `POST /api/delivery/{delivery_id}/delivered` | Guarded delivery completion transition |
+| `POST /api/delivery/{delivery_id}/failed` | Record a failed delivery with a reason |
+| `POST /api/delivery/{delivery_id}/cancel` | Record a cancelled delivery with a reason |
+| `POST /api/delivery/{delivery_id}/callback` | Apply an idempotent local callback event |
+| `GET /api/audit-events` | Review audit events for inventory, purchasing, delivery, and auth actions |
+| `GET /api/tax/configuration` | List tax rules and the rule effective today |
+| `POST /api/tax/configuration` | Add a validated, audited manager/admin tax rule |
+
+### Promotions and discounts
+
+Operator-created counter and delivery orders may use one replaceable promotion before payment.
+Codes are trimmed, case-insensitive, and stored normalized; v1 supports bounded fixed-amount and
+percentage discounts with inclusive validity dates and no stacking. Managers/admins create rules,
+operators may apply eligible rules, and viewers remain read-only. Apply/remove mutations require
+idempotency keys, are audited transactionally, enforce usage limits, and reject paid, released,
+closed, cancelled, or public QR orders. Promotion snapshots preserve code, rule, and exact
+discount values on orders and receipts. Tax is recalculated from the discounted taxable subtotal
+using the existing tax-rule snapshot. Refunds, voids, usage reversal, gateways, and customer QR
+discounts remain out of scope.
+
+| `GET /api/promotions` | List promotion definitions and operator capability/status |
+| `POST /api/promotions` | Create a manager/admin promotion definition |
+| `POST /api/orders/{order_id}/promotions` | Apply or replace a promotion before payment; requires `Idempotency-Key` |
+| `DELETE /api/orders/{order_id}/promotions/{applied_id}` | Remove a promotion before payment; requires `Idempotency-Key` |
 
 The legacy `POST /api/purchases/{purchase_id}/receive` call without a body remains supported where safe: it records a draft as ordered, receives all outstanding lines, and returns the historical purchase-row response. The legacy `POST /api/stock/receipt` endpoint remains available and supports an optional idempotency key for safe retries.
 
@@ -376,7 +393,7 @@ The current POS does not include:
 - External courier, driver, GPS, route-optimization, webhook, or online-delivery integration.
 - Delivery refunds, cash-on-delivery collection, or settlement workflows.
 - Multi-store or multi-location synchronization; the QR route, delivery board, and payment queue use the single local SQLite store.
-- Recipe-level stock depletion, automatic sale reservations, discounts, or purchase invoicing.
+- Recipe-level stock depletion, automatic sale reservations, or purchase invoicing.
 
 ## 9. Acceptance criteria
 

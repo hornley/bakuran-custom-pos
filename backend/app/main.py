@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from decimal import Decimal, DecimalException, ROUND_HALF_UP
+from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 import math
 import secrets
 import sqlite3
+from typing import Any
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -17,11 +18,23 @@ from .auth import (
     AuthMiddleware,
     initialize_auth,
     auth_enabled,
+    local_dev_bypass_enabled,
     record_event_in_connection,
     router as auth_router,
 )
 from .tax import TaxRuleConflictError, TaxValidationError, create_rule, effective_rule, order_tax_snapshot, snapshot_values
-
+from .promotions import (
+    PromotionApplyIn,
+    PromotionCreateIn,
+    applied_promotion_view,
+    apply_promotion as apply_order_promotion,
+    create_promotion as create_promotion_definition,
+    promotion_view,
+    receipt_promotion_values,
+    reprice_order,
+    remove_promotion as remove_order_promotion,
+)
+from . import auth as auth_module
 # Inventory is counted in whole units. This practical application bound keeps
 # every persisted stock quantity well below SQLite's signed INTEGER limit while
 # still leaving ample room for normal restaurant inventory.
@@ -294,6 +307,38 @@ def _actor_user_id(request: Request) -> int | None:
     return user.get("id") if user else None
 
 
+def _promotion_actor_id(request: Request) -> int | None:
+    return _actor_user_id(request)
+
+
+def _promotion_roles(request: Request) -> set[str]:
+    """Return roles from middleware state, with a DB fallback for test clients."""
+    user = getattr(request.state, "auth_user", None)
+    if user:
+        return set(user.get("roles", []))
+    if not auth_enabled():
+        return set()
+    token = request.cookies.get("local_session")
+    if not token:
+        return set()
+    from .auth import current_user
+    user = current_user(request, token)
+    return set(user.get("roles", [])) if user else set()
+
+
+def _promotion_user(request: Request) -> dict[str, Any] | None:
+    user = getattr(request.state, "auth_user", None)
+    if user:
+        return user
+    if not auth_enabled():
+        return None
+    token = request.cookies.get("local_session")
+    if not token:
+        return None
+    from .auth import current_user
+    return current_user(request, token)
+
+
 def _delivery_audit(c, request: Request, event_type: str, detail: str = "") -> None:
     record_event_in_connection(c, _actor_user_id(request), event_type, request.url.path, detail)
 
@@ -410,8 +455,17 @@ def order_view(c, oid):
     def money_text(raw) -> str:
         return format(Decimal(str(raw)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
 
-    taxable_subtotal = money_text(o["taxable_subtotal"])
-    tax_amount = money_text(o["tax_amount"])
+    def _row_money(raw) -> str:
+        try:
+            parsed = Decimal(str(raw or "0"))
+            if not parsed.is_finite():
+                raise InvalidOperation
+            return format(parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f")
+        except (InvalidOperation, DecimalException, TypeError, ValueError):
+            return "0.00"
+
+    taxable_subtotal = _row_money(o["taxable_subtotal"])
+    tax_amount = _row_money(o["tax_amount"])
     if not o["tax_snapshot_at"] and o["tax_policy"] == "none":
         taxable_subtotal = money_text(o["subtotal"])
         tax_amount = "0.00"
@@ -425,6 +479,41 @@ def order_view(c, oid):
         "total": money_text(o["total"]),
         "snapshot_at": o["tax_snapshot_at"],
     }
+    # Promotion fields are additive to the established order-view contract.
+    # New orders always have these migration defaults; legacy seed/history rows
+    # fall back to their original subtotal here without rewriting the database.
+    original_subtotal = money_text(o["original_subtotal"])
+    discount_amount = money_text(o["discount_amount"])
+    discounted_subtotal = money_text(o["discounted_subtotal"])
+    if Decimal(original_subtotal) == Decimal("0.00") and Decimal(str(o["subtotal"])) != Decimal("0.00"):
+        original_subtotal = money_text(o["subtotal"])
+    if Decimal(discounted_subtotal) == Decimal("0.00") and Decimal(original_subtotal) != Decimal("0.00") and Decimal(discount_amount) == Decimal("0.00"):
+        discounted_subtotal = original_subtotal
+    value["promotion"] = None
+    value["pricing"] = {
+        "original_subtotal": original_subtotal,
+        "discount_amount": discount_amount,
+        "discounted_subtotal": discounted_subtotal,
+        "total": money_text(o["total"]),
+    }
+    try:
+        applied = c.execute("SELECT * FROM applied_promotions WHERE order_id=?", (oid,)).fetchone()
+    except sqlite3.OperationalError:
+        applied = None
+    if applied:
+        value["promotion"] = {
+            "id": applied["id"],
+            "promotion_id": applied["promotion_id"],
+            "code": applied["code"],
+            "name": applied["name"],
+            "discount_type": applied["discount_type"],
+            "value": applied["value"],
+            "discount_amount": applied["discount_amount"],
+            "original_subtotal": applied["original_subtotal"],
+            "discounted_subtotal": applied["discounted_subtotal"],
+            "applied_at": applied["applied_at"],
+            "applied_by_user_id": applied["applied_by_user_id"],
+        }
     return value
 
 
@@ -595,6 +684,119 @@ def health():
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Database is not ready: {exc}") from exc
     return {"status":"ok", "database_ready":True, "project_name":PROJECT_NAME, "target_stack":TARGET_STACK, "frontend_template":FRONTEND_TEMPLATE, "export_status":EXPORT_STATUS}
+@app.get("/api/promotions")
+def promotions(request: Request):
+    with connect() as c:
+        can_apply = (
+            bool(_promotion_roles(request) & {"admin", "manager", "operator"})
+            if auth_module.auth_enabled()
+            else local_dev_bypass_enabled()
+        )
+        result = [promotion_view(row) for row in c.execute("SELECT * FROM promotions ORDER BY id DESC")]
+        for promotion in result:
+            promotion["can_apply"] = can_apply
+        return result
+
+
+@app.post("/api/promotions", status_code=201)
+def create_promotion_endpoint(
+    payload: PromotionCreateIn,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    if auth_module.auth_enabled() and not (_promotion_roles(request) & {"admin", "manager"}):
+        raise HTTPException(status_code=403, detail="Only managers and administrators can create promotions")
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        result = create_promotion_definition(
+            c,
+            payload,
+            actor_user_id=(_promotion_user(request) or {}).get("id"),
+            path=request.url.path,
+            idempotency_key=idempotency_key,
+        )
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        c.rollback()
+        raise HTTPException(status_code=409, detail="Promotion could not be created") from exc
+    finally:
+        c.close()
+
+
+def _promotion_order_response(c, order_id: int) -> dict[str, Any]:
+    response = order_view(c, order_id)
+    applied = c.execute("SELECT * FROM applied_promotions WHERE order_id=?", (order_id,)).fetchone()
+    response["promotion"] = applied_promotion_view(applied)
+    return response
+
+
+@app.post("/api/orders/{oid}/promotions")
+def apply_promotion_endpoint(
+    oid: int,
+    payload: PromotionApplyIn,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        result = apply_order_promotion(
+            c,
+            oid,
+            payload.code,
+            actor_user_id=(_promotion_user(request) or {}).get("id"),
+            path=request.url.path,
+            idempotency_key=idempotency_key or payload.idempotency_key,
+            response_builder=_promotion_order_response,
+        )
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        c.rollback()
+        raise HTTPException(status_code=409, detail="Promotion could not be applied") from exc
+    finally:
+        c.close()
+
+
+@app.delete("/api/orders/{oid}/promotions/{applied_id}")
+def remove_promotion_endpoint(
+    oid: int,
+    applied_id: int,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    c = connect()
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        result = remove_order_promotion(
+            c,
+            oid,
+            applied_id,
+            actor_user_id=(_promotion_user(request) or {}).get("id"),
+            path=request.url.path,
+            idempotency_key=idempotency_key,
+            response_builder=_promotion_order_response,
+        )
+        c.commit()
+        return result
+    except HTTPException:
+        c.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        c.rollback()
+        raise HTTPException(status_code=409, detail="Promotion could not be removed") from exc
+    finally:
+        c.close()
+
+
 @app.get("/api/tax/configuration")
 def tax_configuration():
     with connect() as c:
@@ -1122,14 +1324,11 @@ def confirm_order(oid: int, x: OrderConfirmIn, request: Request):
             "SELECT 1 FROM delivery_orders WHERE order_id = ?", (oid,)
         ).fetchone():
             fail("Delivery address and contact are required before confirmation", 422)
-        snapshot = order_tax_snapshot(c, o, now_iso())
+        stamp = now_iso()
+        reprice_order(c, oid, snapshot_if_missing=True, snapshot_at=stamp)
         c.execute(
-            """
-            UPDATE restaurant_orders
-            SET customer_name=?, status='awaiting_payment', tax_rule_id=?, tax_name=?, tax_rate=?, tax_policy=?, taxable_subtotal=?, tax_amount=?, total=?, tax_snapshot_at=?, tax_effective_from=?, tax_effective_to=?
-            WHERE id=?
-            """
-            , (x.customer_name.strip(), *snapshot_values(snapshot), oid),
+            "UPDATE restaurant_orders SET customer_name=?, status='awaiting_payment' WHERE id=?",
+            (x.customer_name.strip(), oid),
         )
         c.commit()
         return order_view(c, oid)
@@ -1153,7 +1352,7 @@ def add_line(oid:int,x:LineIn):
         if old: c.execute("UPDATE restaurant_order_lines SET quantity=?,line_total=? WHERE order_id=? AND menu_item_id=?",(new_qty,str(line_total),oid,x.menu_item_id))
         else:
             c.execute("INSERT INTO restaurant_order_lines(order_id,menu_item_id,item_name,quantity,unit_price,line_total) VALUES(?,?,?,?,?,?)",(oid,x.menu_item_id,item["name"],x.quantity,item["price"],str(line_total)))
-        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
+        reprice_order(c, oid); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 @app.delete("/api/orders/{oid}/lines/{lid}")
@@ -1163,7 +1362,7 @@ def remove_line(oid:int,lid:int):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["status"]!="open": fail("Only open orders can be edited",409)
         if not c.execute("DELETE FROM restaurant_order_lines WHERE id=? AND order_id=?",(lid,oid)).rowcount: fail("Order line not found",404)
-        total=order_subtotal(c, oid); c.execute("UPDATE restaurant_orders SET subtotal=?,total=? WHERE id=? AND tax_snapshot_at IS NULL",(str(total),str(total),oid)); c.commit(); return order_view(c,oid)
+        reprice_order(c, oid); c.commit(); return order_view(c,oid)
     except HTTPException:c.rollback();raise
     finally:c.close()
 
@@ -1204,7 +1403,7 @@ def pay(oid:int,x:PaymentIn):
         c.execute("BEGIN IMMEDIATE"); o=get(c,"restaurant_orders",oid)
         if o["order_channel"] == "delivery" and x.method != "cash":
             fail("Delivery orders accept cash payment only", 409)
-        if o["status"]=="paid":
+        if o["status"] == "paid":
             existing = c.execute("SELECT amount FROM payments WHERE order_id=?", (oid,)).fetchone()
             if existing and quantize_money(existing["amount"], "Stored payment amount") != quantize_money(x.amount, "Payment amount"):
                 fail("Payment amount must equal order total", 409)
@@ -1250,7 +1449,31 @@ def close_order(oid:int):
         if not c.execute("SELECT 1 FROM payments WHERE order_id=?",(oid,)).fetchone(): fail("Paid order has no payment",409)
         stamp = now_iso(); n=c.execute("SELECT COALESCE(MAX(id),0)+1 FROM receipts").fetchone()[0]
         snapshot = order_tax_snapshot(c, o, o["tax_snapshot_at"] or stamp)
-        c.execute("INSERT INTO receipts(id,receipt_number,order_id,total,issued_at,tax_rule_id,tax_name,tax_rate,tax_policy,taxable_subtotal,tax_amount,tax_snapshot_at,tax_effective_from,tax_effective_to) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(n,f"REC-{n:04d}",oid,str(snapshot["total"]),stamp,*snapshot_values(snapshot)[:6],*snapshot_values(snapshot)[7:]))
+        if not o["tax_snapshot_at"] and c.execute("SELECT 1 FROM applied_promotions WHERE order_id=?", (oid,)).fetchone():
+            # Keep the existing historical close path's tax snapshot semantics
+            # while allowing a promotion to be carried through the receipt.
+            reprice_order(c, oid, snapshot_if_missing=True, snapshot_at=stamp)
+            o = get(c, "restaurant_orders", oid)
+            snapshot = order_tax_snapshot(c, o, o["tax_snapshot_at"] or stamp)
+        o = get(c, "restaurant_orders", oid)
+        promotion_values = receipt_promotion_values(c, oid)
+        c.execute(
+            """
+            INSERT INTO receipts(
+                id,receipt_number,order_id,total,issued_at,
+                tax_rule_id,tax_name,tax_rate,tax_policy,taxable_subtotal,
+                tax_amount,tax_snapshot_at,tax_effective_from,tax_effective_to,
+                promotion_id,promotion_code,promotion_name,promotion_discount_type,
+                promotion_value,promotion_discount_amount,promotion_original_subtotal,
+                promotion_discounted_subtotal
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                n, f"REC-{n:04d}", oid, str(snapshot["total"]), stamp,
+                *snapshot_values(snapshot)[:6], *snapshot_values(snapshot)[7:],
+                *promotion_values,
+            ),
+        )
         c.execute("UPDATE restaurant_orders SET status='closed',closed_at=? WHERE id=?",(stamp,oid)); c.execute("UPDATE table_sessions SET status='closed',closed_at=? WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?)",(stamp,oid)); c.execute("UPDATE dining_tables SET status='available' WHERE id=(SELECT table_id FROM table_sessions WHERE id=(SELECT session_id FROM restaurant_orders WHERE id=?))",(oid,));
         value = order_view(c,oid)
         value["receipt"] = receipt_view(value["receipt"])
