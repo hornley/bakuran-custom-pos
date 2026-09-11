@@ -15,7 +15,8 @@ and customer surfaces.
 - `start.sh`, `stop.sh`, `restart.sh`: fixed-port local launcher lifecycle.
 - `DESIGN.md`: normative visual tokens, hierarchy, accessibility, and responsive behavior.
 - `TESTING.md`: runnable validation commands and known test boundaries.
-- `docs/phases/`: phase scope, handoff, approval gate, and limitations.
+- `docs/`: phase records, feature contracts, specifications, plans, prototypes, and handoff material; read the relevant documents before changing their scope.
+- `TASKS.md`: shared coordination log for parallel work; read it before starting coordinated work, update it at meaningful milestones, and do not stage it in feature commits unless explicitly requested.
 
 Do not invent a parallel frontend, API client, route, or token layer. Trace existing symbols
 and endpoint usage before editing them.
